@@ -1,0 +1,21 @@
+services:
+  - type: worker
+    name: zordx-store-discord-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: GUILD_ID
+        sync: false
+      - key: WELCOME_CHANNEL_ID
+        sync: false
+      - key: TICKET_CATEGORY_ID
+        sync: false
+      - key: TICKET_SUPPORT_ROLE_ID
+        sync: false
+      - key: RULES_CHANNEL_ID
+        sync: false
+      - key: SHOP_NAME
+        value: ZORDX STORE
