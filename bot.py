@@ -222,33 +222,22 @@ async def ajuda(interaction: discord.Interaction):
 
 
 @bot.tree.error
-async def command_error(i,error):
-    ms = round(bot.latency * 1000)
-    await interaction.response.send_message(
-        f"🏓 Pong! Latência: {ms} ms"
-    )
-
-
-@bot.tree.command(name="ajuda", description="Ver os comandos do bot")
-async def ajuda(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        "🤖 **ZORDX STORE BOT**\n"
-        "`/ping` — Latência\n"
-        "`/ajuda` — Lista de comandos\n"
-        "`/produtos` — Ver produtos\n"
-        "`/painel_tickets` — Painel de tickets",
-        ephemeral=True
-    )
-async def command_error(i,error):
-    logging.error("Erro de comando: %r",error)
-    msg="Não foi possível executar. Confira as permissões e tente novamente."
-    if isinstance(error,app_commands.CheckFailure): msg="Comando restrito à equipe."
+async def command_error(i, error):
+    logging.error("Erro de comando: %r", error)
+    msg = "Não foi possível executar. Confira as permissões e tente novamente."
+    if isinstance(error, app_commands.CheckFailure):
+        msg = "Comando restrito à equipe."
     try:
-        if i.response.is_done(): await i.followup.send(msg,ephemeral=True)
-        else: await i.response.send_message(msg,ephemeral=True)
-    except discord.HTTPException: pass
+        if i.response.is_done():
+            await i.followup.send(msg, ephemeral=True)
+        else:
+            await i.response.send_message(msg, ephemeral=True)
+    except discord.HTTPException:
+        pass
 
-if __name__=="__main__":
-    if not TOKEN: raise SystemExit("Configure DISCORD_TOKEN nas variáveis de ambiente.")
+
+if __name__ == "__main__":
+    if not TOKEN:
+        raise SystemExit("Configure DISCORD_TOKEN nas variáveis de ambiente.")
     db_init()
     bot.run(TOKEN)
