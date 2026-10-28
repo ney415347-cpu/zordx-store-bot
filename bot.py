@@ -1,4 +1,4 @@
-import os
+hjimport os
 import json
 import sqlite3
 import logging
@@ -881,7 +881,7 @@ async def rankset(interaction: discord.Interaction, membro: discord.Member, rank
 @app_commands.describe(produto="Nome do produto", valor="Valor total recebido em reais",
                        quantidade="Quantidade vendida")
 async def registrar_venda(interaction: discord.Interaction, produto: str,
-                           valor: app_commands.Range[float, 0.01, 100000000],
+                           valor: app_commands.Range[float, 0.01, 100000000.0],
                            quantidade: app_commands.Range[int, 1, 1000000] = 1):
     with sqlite3.connect(DB_PATH) as c:
         c.execute(
