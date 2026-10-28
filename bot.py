@@ -2,8 +2,7 @@ import os
 import json
 import sqlite3
 import logging
-import io
-from datetime import timedelta, datetime, timezone
+from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -12,1141 +11,716 @@ from dotenv import load_dotenv
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("zordx")
 
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 GUILD_ID = int(os.getenv("GUILD_ID", "0") or 0)
-WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0") or 0)
-TICKET_CATEGORY_ID = int(os.getenv("TICKET_CATEGORY_ID", "0") or 0)
-TICKET_SUPPORT_ROLE_ID = int(os.getenv("TICKET_SUPPORT_ROLE_ID", "0") or 0)
-RULES_CHANNEL_ID = int(os.getenv("RULES_CHANNEL_ID", "0") or 0)
-SHOP_NAME = os.getenv("SHOP_NAME", "ZORDX STORE")
-SHOP_COLOR = os.getenv("SHOP_COLOR", "5865F2").lstrip("#")
 DB_PATH = os.getenv("DB_PATH", "zordx.sqlite3")
-PRODUCTS_PATH = os.getenv("PRODUCTS_PATH", "products.json")
+SHOP_NAME = os.getenv("SHOP_NAME", "ZORDX STORE")
+DEFAULT_COLOR = os.getenv("SHOP_COLOR", "8B35FF").lstrip("#")
 
 intents = discord.Intents.default()
-intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
-def db_init():
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute("""CREATE TABLE IF NOT EXISTS warnings(
-            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, user_id INTEGER,
-            moderator_id INTEGER, reason TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS tickets(
-            channel_id INTEGER PRIMARY KEY, guild_id INTEGER, opener_id INTEGER,
-            status TEXT DEFAULT 'open', ticket_type TEXT DEFAULT 'Atendimento',
-            closed_by INTEGER, closed_at TEXT)""")
-        # Migrate databases created by older versions without losing existing tickets.
-        ticket_columns = {row[1] for row in c.execute("PRAGMA table_info(tickets)").fetchall()}
-        for column, declaration in (
-            ("ticket_type", "TEXT DEFAULT 'Atendimento'"),
-            ("closed_by", "INTEGER"),
-            ("closed_at", "TEXT"),
-        ):
-            if column not in ticket_columns:
-                c.execute(f"ALTER TABLE tickets ADD COLUMN {column} {declaration}")
-        c.execute("""CREATE TABLE IF NOT EXISTS ticket_reviews(
-            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER, channel_id INTEGER,
-            opener_id INTEGER, rating INTEGER, comment TEXT DEFAULT '',
+def db():
+    return sqlite3.connect(DB_PATH)
+
+
+def init_db():
+    with db() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS shop_products (
+            name TEXT PRIMARY KEY COLLATE NOCASE, description TEXT DEFAULT '',
+            price REAL NOT NULL DEFAULT 0, stock INTEGER NOT NULL DEFAULT 0,
+            link TEXT DEFAULT '')""")
+        c.execute("""CREATE TABLE IF NOT EXISTS coupons (
+            code TEXT PRIMARY KEY COLLATE NOCASE, percent INTEGER NOT NULL,
+            uses_left INTEGER NOT NULL DEFAULT 0, created_by INTEGER,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS shop_products(
-            name TEXT PRIMARY KEY COLLATE NOCASE, description TEXT, price REAL,
-            stock INTEGER DEFAULT 0, link TEXT DEFAULT '')""")
-        c.execute("""CREATE TABLE IF NOT EXISTS coupons(
-            code TEXT PRIMARY KEY COLLATE NOCASE, percent INTEGER, uses_left INTEGER,
-            created_by INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS sales(
-            id INTEGER PRIMARY KEY AUTOINCREMENT, product_name TEXT, amount REAL,
-            quantity INTEGER, seller_id INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS shop_config(
+        c.execute("""CREATE TABLE IF NOT EXISTS shop_config (
             key TEXT PRIMARY KEY, value TEXT)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS shop_balances(
+        c.execute("""CREATE TABLE IF NOT EXISTS zordx_panels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+            title TEXT NOT NULL, description TEXT DEFAULT '', category TEXT DEFAULT 'Geral',
+            image_url TEXT DEFAULT '', color TEXT DEFAULT '8B35FF', buttons_json TEXT DEFAULT '[]',
+            channel_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+            created_by INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS zordx_withdrawals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL, amount REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'Pendente', created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS zordx_balances (
             guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, balance REAL NOT NULL DEFAULT 0,
             PRIMARY KEY(guild_id, user_id))""")
-        c.execute("""CREATE TABLE IF NOT EXISTS shop_orders(
-            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
-            product_name TEXT NOT NULL, price REAL NOT NULL, status TEXT NOT NULL DEFAULT 'Pendente',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS member_profiles(
-            guild_id INTEGER, user_id INTEGER, bio TEXT DEFAULT '', points INTEGER DEFAULT 0,
-            PRIMARY KEY(guild_id, user_id))""")
-        c.execute("""CREATE TABLE IF NOT EXISTS member_ranks(
-            guild_id INTEGER, user_id INTEGER, rank TEXT, updated_by INTEGER,
-            PRIMARY KEY(guild_id, user_id))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS zordx_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+            channel_id INTEGER NOT NULL UNIQUE, user_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'Aberto', created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            closed_at TEXT DEFAULT '')""")
 
 
-def embed(title, description, color=None):
-    if color is None:
-        try:
-            color = discord.Color(int(SHOP_COLOR, 16))
-        except ValueError:
-            color = discord.Color.from_rgb(88, 101, 242)
-    return discord.Embed(
-        title=str(title)[:256],
-        description=str(description)[:4000],
-        color=color
-    )
-
-
-def staff(i):
-    return isinstance(i.user, discord.Member) and (
-        i.user.guild_permissions.administrator
-        or i.user.guild_permissions.manage_guild
-        or i.user.guild_permissions.manage_messages
-    )
-
-
-async def staff_check(i):
-    return staff(i)
+def color_from(value):
+    try:
+        return discord.Color(int((value or DEFAULT_COLOR).replace("#", ""), 16))
+    except (ValueError, AttributeError):
+        return discord.Color.purple()
 
 
 def money(value):
     return f"R$ {float(value):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
-def get_products():
-    # Use the database first; fall back to the existing products.json file.
-    with sqlite3.connect(DB_PATH) as c:
-        rows = c.execute(
-            "SELECT name, description, price, stock, link FROM shop_products ORDER BY name"
-        ).fetchall()
-    if rows:
-        return [
-            {"name": r[0], "description": r[1], "price": money(r[2]), "stock": r[3], "link": r[4]}
-            for r in rows
-        ]
-    try:
-        with open(PRODUCTS_PATH, encoding="utf-8") as f:
-            items = json.load(f)
-        return items if isinstance(items, list) else []
-    except (OSError, json.JSONDecodeError):
-        return []
+def is_staff(interaction: discord.Interaction):
+    return isinstance(interaction.user, discord.Member) and (
+        interaction.user.guild_permissions.administrator
+        or interaction.user.guild_permissions.manage_guild
+        or interaction.user.guild_permissions.manage_messages
+    )
 
 
-TICKET_TYPES = [
-    ("Ajuda", "🆘"), ("Dúvidas", "❓"),
-    ("Suporte de compra", "🛒"), ("Denúncias", "🚨"),
-    ("Relatos", "📝"), ("Pagamentos", "💳"),
-    ("Entrega de produto", "📦"), ("Parcerias", "🤝"),
-]
+def is_premium(interaction: discord.Interaction):
+    if not isinstance(interaction.user, discord.Member):
+        return False
+    return interaction.user.guild_permissions.administrator or any(
+        role.name.lower().strip() == "premium" for role in interaction.user.roles
+    )
 
 
-def config_value(key, default=""):
-    with sqlite3.connect(DB_PATH) as c:
-        row = c.execute("SELECT value FROM shop_config WHERE key=?", (key,)).fetchone()
+def staff_only():
+    async def predicate(interaction: discord.Interaction):
+        return is_staff(interaction)
+    return app_commands.check(predicate)
+
+
+def premium_only():
+    async def predicate(interaction: discord.Interaction):
+        return is_premium(interaction)
+    return app_commands.check(predicate)
+
+
+def cfg(guild_id, key, default=""):
+    with db() as c:
+        row = c.execute("SELECT value FROM shop_config WHERE key=?", (f"{guild_id}:{key}",)).fetchone()
     return row[0] if row else default
 
 
-def save_config(key, value):
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute("INSERT OR REPLACE INTO shop_config(key,value) VALUES(?,?)", (key, str(value)))
+def set_cfg(guild_id, key, value):
+    with db() as c:
+        c.execute("INSERT OR REPLACE INTO shop_config(key,value) VALUES(?,?)", (f"{guild_id}:{key}", str(value)))
 
 
-async def create_ticket(interaction: discord.Interaction, ticket_type: str, reason: str = ""):
-    guild = interaction.guild
-    if not guild:
-        return await interaction.response.send_message("Use dentro do servidor.", ephemeral=True)
-    schedule_ok, schedule_message = ticket_schedule_allows(guild.id)
-    if not schedule_ok:
-        return await interaction.response.send_message(f"🕒 {schedule_message}", ephemeral=True)
-    with sqlite3.connect(DB_PATH) as c:
-        open_rows = c.execute(
-            "SELECT channel_id FROM tickets WHERE guild_id=? AND opener_id=? AND status='open'",
-            (guild.id, interaction.user.id)
-        ).fetchall()
-    active_channels = [guild.get_channel(row[0]) for row in open_rows]
-    active_channels = [channel for channel in active_channels if channel is not None]
-    max_open = int(config_value(f"ticket_limit_{guild.id}", "5") or 5)
-    if len(active_channels) >= max_open:
-        return await interaction.response.send_message(
-            f"Você atingiu o limite de **{max_open} tickets abertos**. Feche um ticket antes de abrir outro.",
-            ephemeral=True
-        )
-    category_id = int(config_value("ticket_category_id", str(TICKET_CATEGORY_ID)) or 0)
-    support_role_id = int(config_value("ticket_support_role_id", str(TICKET_SUPPORT_ROLE_ID)) or 0)
-    category = guild.get_channel(category_id) if category_id else None
-    if not isinstance(category, discord.CategoryChannel):
-        category = None
-    perms = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        interaction.user: discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, read_message_history=True, attach_files=True
-        ),
-    }
-    if guild.me:
-        perms[guild.me] = discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, read_message_history=True, manage_channels=True
-        )
-    role = guild.get_role(support_role_id) if support_role_id else None
-    if role:
-        perms[role] = discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, read_message_history=True
-        )
-    try:
-        safe = "".join(x.lower() if x.isalnum() else "-" for x in interaction.user.name).strip("-")
-        safe = (safe or str(interaction.user.id))[:45]
-        template = config_value(f"ticket_channel_name_template_{guild.id}", "ticket-{user}")
-        channel_name = template.replace("{user}", safe).replace("{type}", "".join(x.lower() if x.isalnum() else "-" for x in ticket_type).strip("-")).strip("-")
-        channel_name = "-".join(part for part in channel_name.split("-") if part)[:95] or f"ticket-{interaction.user.id}"
-        channel = await guild.create_text_channel(
-            channel_name, category=category, overwrites=perms,
-            topic=f"Ticket de {interaction.user} | Categoria: {ticket_type} | ID: {interaction.user.id}" + (f" | Motivo: {reason[:500]}" if reason else "")
-        )
-        with sqlite3.connect(DB_PATH) as c:
-            c.execute(
-                "INSERT OR REPLACE INTO tickets(channel_id,guild_id,opener_id,status,ticket_type) "
-                "VALUES(?,?,?,'open',?)",
-                (channel.id, guild.id, interaction.user.id, ticket_type)
-            )
-        reason_text = f"\n\n**Motivo informado:** {discord.utils.escape_markdown(reason[:500])}" if reason else ""
-        e = embed(f"🎫 {ticket_type} — {SHOP_NAME}",
-                  f"Olá {interaction.user.mention}! Explique como podemos ajudar.{reason_text}\n\n"
-                  "🔒 Este canal é privado. Nunca envie senhas ou códigos de autenticação.",
-                  color=discord.Color.blue())
-        open_image = config_value(f"ticket_open_image_{guild.id}", "").strip()
-        if open_image:
-            e.set_image(url=open_image)
-        await channel.send(content=interaction.user.mention, embed=e, view=CloseTicket())
-        log_id = int(config_value("ticket_logs_channel_id", "0") or 0)
-        log_channel = guild.get_channel(log_id) if log_id else None
-        if isinstance(log_channel, discord.TextChannel):
-            await log_channel.send(embed=embed(
-                "🟢 Ticket aberto", f"**Categoria:** {ticket_type}\n**Usuário:** {interaction.user.mention}\n**Canal:** {channel.mention}",
-                color=discord.Color.blue()))
-        await interaction.response.send_message(f"✅ Seu ticket foi criado: {channel.mention}", ephemeral=True)
-    except discord.Forbidden:
-        await interaction.response.send_message(
-            "Não consegui criar o ticket. Confira se o bot tem as permissões Gerenciar Canais e Ver Canais.",
-            ephemeral=True
-        )
+def get_products():
+    with db() as c:
+        return c.execute("SELECT name, description, price, stock, link FROM shop_products ORDER BY name").fetchall()
 
 
-class TicketCategoryView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=180)
-        for index, (label, emoji) in enumerate(TICKET_TYPES):
-            self.add_item(TicketCategoryButton(label, emoji, row=index // 2))
+def panel_embed(title, description, category, image_url, color):
+    e = discord.Embed(title=title[:256], description=description[:4000], color=color_from(color))
+    e.add_field(name="Categoria", value=(category or "Geral")[:100], inline=True)
+    e.set_footer(text=f"{SHOP_NAME} • Painel da loja")
+    if image_url:
+        e.set_image(url=image_url)
+    return e
 
 
-class TicketCategoryButton(discord.ui.Button):
-    def __init__(self, label: str, emoji: str, row: int):
-        super().__init__(label=label, emoji=emoji, style=discord.ButtonStyle.primary, row=row)
-        self.ticket_type = label
-
-    async def callback(self, interaction: discord.Interaction):
-        await create_ticket(interaction, self.ticket_type)
-
-
-class TicketPanel(discord.ui.View):
-    def __init__(self):
+class PanelActionView(discord.ui.View):
+    def __init__(self, buttons=None):
         super().__init__(timeout=None)
-
-    @discord.ui.button(label="Atendimento", style=discord.ButtonStyle.primary,
-                       emoji="🎫", custom_id="zordx:open")
-    async def open(self, interaction: discord.Interaction, button: discord.ui.Button):
-        e = embed("🎫 Central de Atendimento — " + SHOP_NAME,
-                  "Selecione uma das categorias abaixo para abrir seu atendimento.",
-                  color=discord.Color.blue())
-        await interaction.response.send_message(embed=e, view=TicketCategoryView(), ephemeral=True)
-
-
-class TicketRatingView(discord.ui.View):
-    def __init__(self, guild_id: int, channel_id: int, opener_id: int):
-        super().__init__(timeout=86400)
-        self.guild_id, self.channel_id, self.opener_id = guild_id, channel_id, opener_id
-        for score in range(1, 6):
-            self.add_item(TicketRatingButton(score, self))
-
-
-class TicketRatingButton(discord.ui.Button):
-    def __init__(self, score: int, parent_view: TicketRatingView):
-        super().__init__(label=f"{score} estrela{'s' if score != 1 else ''}",
-                         emoji="⭐", style=discord.ButtonStyle.primary)
-        self.score, self.parent_view = score, parent_view
-
-    async def callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.parent_view.opener_id:
-            return await interaction.response.send_message("Só quem abriu o ticket pode avaliar.", ephemeral=True)
-        with sqlite3.connect(DB_PATH) as c:
-            existing = c.execute("SELECT id FROM ticket_reviews WHERE channel_id=? AND opener_id=?",
-                                  (self.parent_view.channel_id, self.parent_view.opener_id)).fetchone()
-            if existing:
-                return await interaction.response.send_message("Você já avaliou este atendimento.", ephemeral=True)
-            c.execute("INSERT INTO ticket_reviews(guild_id,channel_id,opener_id,rating) VALUES(?,?,?,?)",
-                      (self.parent_view.guild_id, self.parent_view.channel_id,
-                       self.parent_view.opener_id, self.score))
-        review_channel_id = int(config_value("ticket_reviews_channel_id", "0") or 0)
-        guild = bot.get_guild(self.parent_view.guild_id)
-        review_channel = guild.get_channel(review_channel_id) if guild and review_channel_id else None
-        if isinstance(review_channel, discord.TextChannel):
-            await review_channel.send(embed=embed(
-                "⭐ Nova avaliação — " + SHOP_NAME,
-                f"**Cliente:** {interaction.user.mention}\n**Nota:** {'⭐' * self.score} ({self.score}/5)\n"
-                f"**Ticket:** `#{self.parent_view.channel_id}`", color=discord.Color.blue()))
-        for child in self.parent_view.children:
-            child.disabled = True
-        await interaction.response.edit_message(
-            content=f"Obrigado pela avaliação! Você deu **{'⭐' * self.score} ({self.score}/5)**.",
-            view=self.parent_view
-        )
-
-
-class CloseTicket(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Fechar ticket", style=discord.ButtonStyle.danger,
-                       emoji="🔒", custom_id="zordx:close")
-    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
-            return await interaction.response.send_message("Use no canal do ticket.", ephemeral=True)
-        with sqlite3.connect(DB_PATH) as c:
-            row = c.execute(
-                "SELECT opener_id,status,ticket_type FROM tickets WHERE channel_id=?",
-                (interaction.channel.id,)
-            ).fetchone()
-        if not row or row[1] != "open":
-            return await interaction.response.send_message("Ticket já fechado ou não registrado.", ephemeral=True)
-        if interaction.user.id != row[0] and not staff(interaction):
-            return await interaction.response.send_message("Só quem abriu ou a equipe pode fechar.", ephemeral=True)
-        channel = interaction.channel
-        transcript_lines = [f"Transcrição do ticket #{channel.name}", f"ID do canal: {channel.id}",
-                            f"Categoria: {row[2]}", f"Fechado por: {interaction.user} ({interaction.user.id})", ""]
-        try:
-            async for msg in channel.history(limit=None, oldest_first=True):
-                stamp = msg.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
-                body = (msg.content or "[sem texto]").replace("\n", " ")
-                if msg.attachments:
-                    body += " | anexos: " + ", ".join(a.url for a in msg.attachments)
-                if msg.embeds:
-                    body += f" | embeds: {len(msg.embeds)}"
-                transcript_lines.append(f"[{stamp}] {msg.author} ({msg.author.id}): {body}")
-            transcript = "\n".join(transcript_lines)
-            transcript_file = discord.File(io.BytesIO(transcript.encode("utf-8")),
-                                           filename=f"ticket-{channel.id}-transcript.txt")
-        except discord.HTTPException:
-            transcript_file = None
-        with sqlite3.connect(DB_PATH) as c:
-            c.execute("UPDATE tickets SET status='closed',closed_by=?,closed_at=CURRENT_TIMESTAMP WHERE channel_id=?",
-                      (interaction.user.id, channel.id))
-        await interaction.response.send_message("🔒 Ticket fechado. Estou registrando o histórico.")
-        log_id = int(config_value("ticket_logs_channel_id", "0") or 0)
-        log_channel = interaction.guild.get_channel(log_id) if log_id else None
-        if isinstance(log_channel, discord.TextChannel):
-            log_embed = embed("🔒 Ticket fechado — " + SHOP_NAME,
-                f"**Categoria:** {row[2]}\n**Cliente:** <@{row[0]}> (`{row[0]}`)\n"
-                f"**Fechado por:** {interaction.user.mention}\n**Canal original:** `#{channel.name}` (`{channel.id}`)",
-                color=discord.Color.blue())
-            try:
-                if transcript_file:
-                    await log_channel.send(embed=log_embed, file=transcript_file)
+        names = buttons or ["Ver produtos", "Cupons", "Suporte"]
+        for index, label in enumerate(names[:5]):
+            label = label.strip()[:80]
+            if not label:
+                continue
+            button = discord.ui.Button(label=label, style=discord.ButtonStyle.primary, custom_id=f"zordx:panel:{index}:{label.lower()[:20]}")
+            async def callback(interaction: discord.Interaction, chosen=label):
+                key = chosen.casefold()
+                if "produto" in key:
+                    rows = get_products()
+                    if not rows:
+                        text_out = "Ainda não há produtos cadastrados na loja."
+                    else:
+                        text_out = "\n".join(f"**{n}** — {money(p)} • Estoque: {s}\n{d or 'Sem descrição'}" for n, d, p, s, _ in rows[:15])
+                    await interaction.response.send_message(text_out[:1900], ephemeral=True)
+                elif "cupom" in key:
+                    with db() as c:
+                        rows = c.execute("SELECT code, percent, uses_left FROM coupons ORDER BY code").fetchall()
+                    text_out = "\n".join(f"`{code}` — {pct}% de desconto • usos restantes: {uses}" for code, pct, uses in rows[:15]) or "Não há cupons cadastrados."
+                    await interaction.response.send_message(text_out[:1900], ephemeral=True)
                 else:
-                    await log_channel.send(embed=log_embed.set_footer(text="Transcrição indisponível."))
-            except discord.HTTPException:
-                logging.exception("Não foi possível enviar o log/transcrição do ticket")
-        opener = interaction.guild.get_member(row[0])
-        if opener and config_value("ticket_reviews_enabled", "1") == "1":
-            try:
-                await opener.send(embed=embed("⭐ Avalie seu atendimento — " + SHOP_NAME,
-                    "Como foi sua experiência? Escolha uma nota de 1 a 5 estrelas.", color=discord.Color.blue()),
-                    view=TicketRatingView(interaction.guild.id, channel.id, row[0]))
-            except discord.Forbidden:
-                pass
-        try:
-            await channel.edit(name=("fechado-" + channel.name)[:100])
-            await channel.set_permissions(interaction.guild.default_role, view_channel=False)
-        except discord.HTTPException:
-            pass
+                    support_id = int(cfg(interaction.guild_id or 0, "support_channel_id", "0") or 0)
+                    channel = interaction.guild.get_channel(support_id) if interaction.guild and support_id else None
+                    message = f"Para falar com a equipe, acesse {channel.mention}." if channel else "Entre em contato com a equipe da loja para receber suporte."
+                    await interaction.response.send_message(message, ephemeral=True)
+            button.callback = callback
+            self.add_item(button)
 
 
-class ConfigChannelSelect(discord.ui.ChannelSelect):
-    def __init__(self, config_key: str, label: str, channel_types):
-        super().__init__(placeholder=label, channel_types=channel_types, min_values=1, max_values=1)
-        self.config_key = config_key
-
-    async def callback(self, interaction: discord.Interaction):
-        selected = self.values[0]
-        save_config(self.config_key, selected.id)
-        await interaction.response.send_message(f"✅ Configuração salva: {selected.mention}", ephemeral=True)
-
-
-class ConfigRoleSelect(discord.ui.RoleSelect):
-    def __init__(self):
-        super().__init__(placeholder="Escolher cargo da equipe de suporte", min_values=1, max_values=1)
-
-    async def callback(self, interaction: discord.Interaction):
-        global TICKET_SUPPORT_ROLE_ID
-        role = self.values[0]
-        TICKET_SUPPORT_ROLE_ID = role.id
-        save_config("ticket_support_role_id", role.id)
-        await interaction.response.send_message(f"✅ Equipe de suporte definida: {role.mention}", ephemeral=True)
-
-
-class TicketConfigView(discord.ui.View):
-    def __init__(self):
+class PublishPanelView(discord.ui.View):
+    def __init__(self, guild_id, channel_id, title, description, category, image_url, color, buttons, creator_id):
         super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        self.title_text = title
+        self.description_text = description
+        self.category = category
+        self.image_url = image_url
+        self.color = color
+        self.buttons = buttons
+        self.creator_id = creator_id
 
-    @discord.ui.button(label="Categoria dos tickets", emoji="📁", style=discord.ButtonStyle.primary, row=0)
-    async def category(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = discord.ui.View(timeout=180)
-        view.add_item(ConfigChannelSelect("ticket_category_id", "Selecionar categoria", [discord.ChannelType.category]))
-        await interaction.response.send_message("📁 Escolha a categoria onde os tickets serão criados:", view=view, ephemeral=True)
+    @discord.ui.button(label="Publicar painel", style=discord.ButtonStyle.success, emoji="📣")
+    async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.creator_id and not is_staff(interaction):
+            return await interaction.response.send_message("Somente quem iniciou ou a equipe pode publicar este painel.", ephemeral=True)
+        guild = interaction.guild
+        channel = guild.get_channel(self.channel_id) if guild else None
+        if not isinstance(channel, discord.TextChannel):
+            return await interaction.response.send_message("O canal escolhido não está disponível. Tente novamente.", ephemeral=True)
+        try:
+            message = await channel.send(embed=panel_embed(self.title_text, self.description_text, self.category, self.image_url, self.color), view=PanelActionView(self.buttons))
+            with db() as c:
+                c.execute("INSERT INTO zordx_panels(guild_id,title,description,category,image_url,color,buttons_json,channel_id,message_id,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                          (self.guild_id, self.title_text, self.description_text, self.category, self.image_url, self.color,
+                           json.dumps(self.buttons, ensure_ascii=False), channel.id, message.id, self.creator_id))
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(content=f"✅ Painel **{self.title_text}** publicado em {channel.mention} e registrado para edição futura.", embed=None, view=self)
+        except discord.Forbidden:
+            await interaction.response.send_message("Não tenho permissão para enviar mensagens ou embeds nesse canal.", ephemeral=True)
 
-    @discord.ui.button(label="Equipe de suporte", emoji="👥", style=discord.ButtonStyle.primary, row=0)
-    async def support(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = discord.ui.View(timeout=180)
-        view.add_item(ConfigRoleSelect())
-        await interaction.response.send_message("👥 Escolha o cargo da equipe:", view=view, ephemeral=True)
-
-    @discord.ui.button(label="Canal de logs", emoji="📋", style=discord.ButtonStyle.primary, row=1)
-    async def logs(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = discord.ui.View(timeout=180)
-        view.add_item(ConfigChannelSelect("ticket_logs_channel_id", "Selecionar canal de logs", [discord.ChannelType.text]))
-        await interaction.response.send_message("📋 Os fechamentos e transcrições serão enviados aqui:", view=view, ephemeral=True)
-
-    @discord.ui.button(label="Canal de avaliações", emoji="⭐", style=discord.ButtonStyle.primary, row=1)
-    async def reviews(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = discord.ui.View(timeout=180)
-        view.add_item(ConfigChannelSelect("ticket_reviews_channel_id", "Selecionar canal de avaliações", [discord.ChannelType.text]))
-        await interaction.response.send_message("⭐ Escolha onde publicar as avaliações:", view=view, ephemeral=True)
-
-    @discord.ui.button(label="Ativar avaliações", emoji="✅", style=discord.ButtonStyle.success, row=2)
-    async def enable_reviews(self, interaction: discord.Interaction, button: discord.ui.Button):
-        save_config("ticket_reviews_enabled", "1")
-        await interaction.response.send_message("✅ Avaliações ativadas.", ephemeral=True)
-
-    @discord.ui.button(label="Desativar avaliações", emoji="⛔", style=discord.ButtonStyle.secondary, row=2)
-    async def disable_reviews(self, interaction: discord.Interaction, button: discord.ui.Button):
-        save_config("ticket_reviews_enabled", "0")
-        await interaction.response.send_message("Avaliações desativadas.", ephemeral=True)
-
-    @discord.ui.button(label="Publicar painel", emoji="🎫", style=discord.ButtonStyle.primary, row=3)
-    async def publish_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.channel.send(embed=embed(
-            "🎫 Central de Atendimento — " + SHOP_NAME,
-            "Precisa de ajuda? Clique em **Atendimento** para ver as 8 categorias disponíveis.",
-            color=discord.Color.blue()), view=TicketPanel())
-        await interaction.response.send_message("✅ Painel de atendimento publicado.", ephemeral=True)
-
-    @discord.ui.button(label="Estatísticas", emoji="📊", style=discord.ButtonStyle.primary, row=3)
-    async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
-        with sqlite3.connect(DB_PATH) as c:
-            opened, closed = c.execute("SELECT SUM(status='open'),SUM(status='closed') FROM tickets WHERE guild_id=?",
-                                       (interaction.guild_id,)).fetchone()
-            reviews, avg = c.execute("SELECT COUNT(*),AVG(rating) FROM ticket_reviews WHERE guild_id=?",
-                                     (interaction.guild_id,)).fetchone()
-        e = embed("📊 Estatísticas de tickets", f"🟢 Abertos: **{opened or 0}**\n🔒 Fechados: **{closed or 0}**\n"
-                  f"⭐ Avaliações: **{reviews or 0}**\n📈 Média: **{f'{avg:.2f}/5' if avg is not None else 'Sem avaliações'}**",
-                  color=discord.Color.blue())
-        await interaction.response.send_message(embed=e, ephemeral=True)
-
-    @discord.ui.button(label="Limite de tickets", emoji="🧮", style=discord.ButtonStyle.secondary, row=4)
-    async def limits(self, interaction: discord.Interaction, button: discord.ui.Button):
-        current = config_value("ticket_limit_per_user", "1")
-        await interaction.response.send_message(
-            f"O limite atual é **{current} ticket(s) aberto(s) por usuário**. No momento, o sistema usa limite 1 para evitar tickets duplicados.",
-            ephemeral=True)
-
-    @discord.ui.button(label="Mensagens e segurança", emoji="🔒", style=discord.ButtonStyle.secondary, row=4)
-    async def safety(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "🔒 Os tickets são privados por padrão. O cliente e o cargo de suporte configurado podem ver o canal; a equipe autorizada ou quem abriu pode fechá-lo.\n\n"
-            "As mensagens de abertura/fechamento podem ser personalizadas em uma próxima etapa.", ephemeral=True)
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.creator_id and not is_staff(interaction):
+            return await interaction.response.send_message("Somente quem iniciou pode cancelar.", ephemeral=True)
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(content="Criação do painel cancelada.", embed=None, view=self)
 
 
-@bot.event
-async def on_ready():
-    global SHOP_NAME, SHOP_COLOR, TICKET_CATEGORY_ID, TICKET_SUPPORT_ROLE_ID
-    db_init()
-    with sqlite3.connect(DB_PATH) as c:
-        saved = dict(c.execute("SELECT key,value FROM shop_config").fetchall())
-    SHOP_NAME = saved.get("shop_name", SHOP_NAME)
-    SHOP_COLOR = saved.get("shop_color", SHOP_COLOR)
-    TICKET_CATEGORY_ID = int(saved.get("ticket_category_id", TICKET_CATEGORY_ID) or 0)
-    TICKET_SUPPORT_ROLE_ID = int(saved.get("ticket_support_role_id", TICKET_SUPPORT_ROLE_ID) or 0)
-    bot.add_view(TicketPanel())
-    bot.add_view(CloseTicket())
-    try:
-        if GUILD_ID:
-            guild = discord.Object(id=GUILD_ID)
-            bot.tree.copy_global_to(guild=guild)
-            await bot.tree.sync(guild=guild)
-        else:
-            await bot.tree.sync()
-    except Exception:
-        logging.exception("Falha ao sincronizar comandos")
-    logging.info("Conectado como %s", bot.user)
+class PanelSelect(discord.ui.Select):
+    def __init__(self, rows):
+        options = [discord.SelectOption(label=(row[1] or "Painel")[:100], description=f"Canal ID: {row[2]} • Painel #{row[0]}"[:100], value=str(row[0])) for row in rows[:25]]
+        super().__init__(placeholder="Escolha o painel que deseja editar", min_values=1, max_values=1, options=options)
 
-
-@bot.event
-async def on_member_join(member):
-    channel = member.guild.get_channel(WELCOME_CHANNEL_ID) if WELCOME_CHANNEL_ID else None
-    if isinstance(channel, discord.TextChannel):
-        e = embed(f"👋 Bem-vindo à {SHOP_NAME}!",
-                  f"Olá {member.mention}! Leia as regras e procure a equipe se precisar de ajuda.")
-        e.set_thumbnail(url=member.display_avatar.url)
-        await channel.send(embed=e)
-
-
-@bot.event
-async def on_member_remove(member):
-    channel = member.guild.get_channel(WELCOME_CHANNEL_ID) if WELCOME_CHANNEL_ID else None
-    if isinstance(channel, discord.TextChannel):
-        await channel.send(embed=embed(
-            "🚪 Membro saiu",
-            f"**{discord.utils.escape_markdown(member.display_name)}** saiu do servidor."
-        ))
-
-
-@bot.tree.command(name="tickets", description="Mostra o estado dos tickets.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-async def tickets(interaction: discord.Interaction):
-    with sqlite3.connect(DB_PATH) as c:
-        opened = c.execute(
-            "SELECT COUNT(*) FROM tickets WHERE guild_id=? AND status='open'",
-            (interaction.guild_id,)
-        ).fetchone()[0]
-        closed = c.execute(
-            "SELECT COUNT(*) FROM tickets WHERE guild_id=? AND status='closed'",
-            (interaction.guild_id,)
-        ).fetchone()[0]
-    await interaction.response.send_message(
-        embed=embed("🎫 Tickets", f"Abertos: **{opened}**\nFechados: **{closed}**"),
-        ephemeral=True
-    )
-
-
-config_group = app_commands.Group(name="config", description="Configura os sistemas da ZORDX STORE")
-
-
-@config_group.command(name="tickets", description="Abre o painel completo de configuração de tickets.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-async def config_tickets_panel(interaction: discord.Interaction):
-    e = embed("⚙️ Gerenciamento de Tickets — " + SHOP_NAME,
-              "Configure categoria, equipe, logs, transcrições, avaliações, painel e estatísticas.\n\n"
-              "Use os botões abaixo para ajustar cada opção.", color=discord.Color.blue())
-    e.add_field(name="📋 Logs", value="Registros de abertura e fechamento + transcrição em TXT.", inline=False)
-    e.add_field(name="⭐ Avaliações", value="Clientes podem dar notas de 1 a 5 estrelas após o fechamento.", inline=False)
-    await interaction.response.send_message(embed=e, view=TicketConfigView(), ephemeral=True)
-
-
-bot.tree.add_command(config_group)
-
-
-@bot.tree.command(name="config_tickets", description="Atalho antigo para configurar categoria e equipe.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-async def config_tickets_legacy(interaction: discord.Interaction):
-    e = embed("⚙️ Gerenciamento de Tickets — " + SHOP_NAME,
-              "Use os botões abaixo para configurar o atendimento.", color=discord.Color.blue())
-    await interaction.response.send_message(embed=e, view=TicketConfigView(), ephemeral=True)
-
-
-@bot.tree.command(name="regras", description="Mostra as regras da loja.")
-@app_commands.guild_only()
-async def rules(interaction: discord.Interaction):
-    text = (
-        "**1.** Respeite membros e equipe.\n"
-        "**2.** Confira produto, preço e condições antes de pagar.\n"
-        "**3.** Use apenas os meios de pagamento oficiais.\n"
-        "**4.** Nunca compartilhe senhas ou códigos.\n"
-        "**5.** Use tickets para pedir suporte.\n"
-        "**6.** Golpes e comprovantes falsos são proibidos.\n"
-        "**7.** Não faça divulgação sem autorização.\n"
-        "**8.** Trocas e reembolsos seguem a política da loja e a legislação aplicável.\n"
-        "**9.** Spam, assédio e discriminação não são permitidos.\n"
-        "**10.** Violações podem resultar em aviso, timeout, expulsão ou banimento."
-    )
-    await interaction.response.send_message(embed=embed("📜 Regras — " + SHOP_NAME, text))
-
-
-@bot.tree.command(name="addestoque", description="Adiciona unidades ao estoque de um produto.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-@app_commands.describe(nome="Nome exato do produto", quantidade="Quantidade a adicionar")
-async def addestoque(interaction: discord.Interaction, nome: str,
-                     quantidade: app_commands.Range[int, 1, 1000000]):
-    with sqlite3.connect(DB_PATH) as c:
-        row = c.execute("SELECT stock FROM shop_products WHERE name=? COLLATE NOCASE",
-                        (nome.strip(),)).fetchone()
+    async def callback(self, interaction: discord.Interaction):
+        panel_id = int(self.values[0])
+        with db() as c:
+            row = c.execute("SELECT id,title,description,category,image_url,color,buttons_json,channel_id,message_id,guild_id FROM zordx_panels WHERE id=? AND guild_id=?", (panel_id, interaction.guild_id)).fetchone()
         if not row:
-            return await interaction.response.send_message(
-                "Produto não encontrado no cadastro. Confira o cadastro existente ou os dados da loja.", ephemeral=True
+            return await interaction.response.send_message("Não encontrei esse painel neste servidor.", ephemeral=True)
+        await interaction.response.send_modal(EditPanelModal(row))
+
+
+class PanelSelectView(discord.ui.View):
+    def __init__(self, rows):
+        super().__init__(timeout=180)
+        self.add_item(PanelSelect(rows))
+
+
+class EditPanelModal(discord.ui.Modal):
+    def __init__(self, row):
+        super().__init__(title="Editar painel da loja")
+        self.panel_id, self.old_title, self.old_description, self.old_category, self.old_image, self.old_color, buttons_json, self.channel_id, self.message_id, self.guild_id = row
+        self.title_input = discord.ui.TextInput(label="Título", default=self.old_title[:256], max_length=256)
+        self.description_input = discord.ui.TextInput(label="Descrição", default=(self.old_description or "")[:1000], style=discord.TextStyle.paragraph, required=False, max_length=1000)
+        self.category_input = discord.ui.TextInput(label="Categoria", default=(self.old_category or "Geral")[:100], max_length=100)
+        self.image_input = discord.ui.TextInput(label="URL da imagem (opcional)", default=(self.old_image or "")[:400], required=False, max_length=400)
+        self.color_input = discord.ui.TextInput(label="Cor hexadecimal (ex.: 8B35FF)", default=(self.old_color or DEFAULT_COLOR)[:7], max_length=7)
+        self.buttons_json = buttons_json or "[]"
+        self.add_item(self.title_input)
+        self.add_item(self.description_input)
+        self.add_item(self.category_input)
+        self.add_item(self.image_input)
+        self.add_item(self.color_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        title = self.title_input.value.strip()
+        description = self.description_input.value.strip()
+        category = self.category_input.value.strip() or "Geral"
+        image_url = self.image_input.value.strip()
+        color = self.color_input.value.strip().lstrip("#") or DEFAULT_COLOR
+        if image_url and not image_url.startswith(("https://", "http://")):
+            return await interaction.response.send_message("A imagem precisa ser um link HTTP ou HTTPS válido.", ephemeral=True)
+        try:
+            color_from(color)
+            buttons = json.loads(self.buttons_json)
+            channel = interaction.guild.get_channel(self.channel_id) if interaction.guild else None
+            if not isinstance(channel, discord.TextChannel):
+                return await interaction.response.send_message("O canal original não foi encontrado. Não alterei o painel.", ephemeral=True)
+            message = await channel.fetch_message(self.message_id)
+            await message.edit(embed=panel_embed(title, description, category, image_url, color), view=PanelActionView(buttons))
+            with db() as c:
+                c.execute("UPDATE zordx_panels SET title=?,description=?,category=?,image_url=?,color=? WHERE id=? AND guild_id=?",
+                          (title, description, category, image_url, color, self.panel_id, self.guild_id))
+            await interaction.response.send_message(
+                f"✅ O painel **{title}** foi atualizado na mensagem original em {channel.mention}. Se quiser, você também pode alterar os botões.",
+                ephemeral=True,
+                view=EditButtonsView(self.panel_id, self.guild_id, self.channel_id, self.message_id, buttons)
             )
-        new_stock = int(row[0]) + int(quantidade)
-        c.execute("UPDATE shop_products SET stock=? WHERE name=? COLLATE NOCASE",
-                  (new_stock, nome.strip()))
-    await interaction.response.send_message(
-        f"📦 Estoque de **{discord.utils.escape_markdown(nome)}** atualizado: **{new_stock}** unidade(s).",
-        ephemeral=True
-    )
+        except discord.NotFound:
+            await interaction.response.send_message("A mensagem original não existe mais. O registro foi mantido para você conferir.", ephemeral=True)
+        except (discord.Forbidden, discord.HTTPException, ValueError, json.JSONDecodeError) as exc:
+            log.exception("Falha ao editar painel: %s", exc)
+            await interaction.response.send_message("Não consegui editar o painel. Confira as permissões, a cor e o link da imagem.", ephemeral=True)
 
 
-class EmbedFieldModal(discord.ui.Modal, title="Adicionar campo ao Embed"):
-    nome = discord.ui.TextInput(label="Nome do campo", max_length=256, required=True)
-    valor = discord.ui.TextInput(label="Conteúdo do campo", style=discord.TextStyle.paragraph, max_length=1024, required=True)
-    inline = discord.ui.TextInput(label="Em linha? (sim/não)", default="não", max_length=5, required=True)
-
-    def __init__(self, editor):
-        super().__init__()
-        self.editor = editor
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if len(self.editor.data["fields"]) >= 25:
-            return await interaction.response.send_message("Um embed aceita no máximo 25 campos.", ephemeral=True)
-        inline = str(self.inline.value).strip().lower() in ("sim", "s", "yes", "y", "true", "1")
-        self.editor.data["fields"].append({"name": str(self.nome.value), "value": str(self.valor.value), "inline": inline})
-        await interaction.response.edit_message(content=f"✅ Campo adicionado ({len(self.editor.data['fields'])}/25).", embed=self.editor.make_embed(), view=self.editor)
-
-
-class EmbedActionModal(discord.ui.Modal):
-    def __init__(self, editor, action):
-        self.editor, self.action = editor, action
-        definitions = {
-            "title": ("Editar título", [("Título", "title", 256, False)]),
-            "description": ("Editar descrição", [("Descrição", "description", 4000, True)]),
-            "color": ("Alterar cor", [("Cor hexadecimal", "color", 7, False)]),
-            "title_url": ("URL do título", [("URL https://...", "title_url", 400, False)]),
-            "author": ("Autor do Embed", [("Nome do autor", "author", 256, False), ("Ícone do autor (URL)", "author_icon", 400, False), ("Link do autor (URL)", "author_url", 400, False)]),
-            "thumbnail": ("Miniatura", [("URL da miniatura", "thumbnail", 400, False)]),
-            "image": ("Imagem principal", [("URL da imagem", "image", 400, False)]),
-            "footer": ("Rodapé", [("Texto do rodapé", "footer", 2048, False), ("Ícone do rodapé (URL)", "footer_icon", 400, False)]),
-            "field_remove": ("Remover campo", [("Número do campo", "field_index", 2, False)]),
-        }
-        title, fields = definitions[action]
-        super().__init__(title=title)
-        self.inputs = {}
-        for label, key, max_length, paragraph in fields:
-            item = discord.ui.TextInput(label=label, default=str(editor.data.get(key, ""))[:max_length], max_length=max_length,
-                required=(key == "field_index"), style=discord.TextStyle.paragraph if paragraph else discord.TextStyle.short)
-            self.inputs[key] = item
-            self.add_item(item)
+class EditButtonsModal(discord.ui.Modal):
+    def __init__(self, panel_id, guild_id, channel_id, message_id, current_buttons):
+        super().__init__(title="Editar botões do painel")
+        self.panel_id = panel_id
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        self.message_id = message_id
+        self.buttons_input = discord.ui.TextInput(
+            label="Botões separados por vírgula",
+            default=", ".join(current_buttons)[:400] or "Ver produtos, Cupons, Suporte",
+            max_length=400,
+            required=True,
+            placeholder="Ver produtos, Cupons, Suporte"
+        )
+        self.add_item(self.buttons_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        updated = {key: str(item.value).strip() for key, item in self.inputs.items()}
-        if self.action == "color":
-            raw = updated["color"].lstrip("#")
-            try:
-                if len(raw) != 6: raise ValueError
-                int(raw, 16)
-            except ValueError:
-                return await interaction.response.send_message("Cor inválida. Use um código hexadecimal como #2563EB.", ephemeral=True)
-            updated["color"] = "#" + raw.upper()
-        if self.action == "field_remove":
-            try: index = int(updated["field_index"]) - 1
-            except ValueError: index = -1
-            if index < 0 or index >= len(self.editor.data["fields"]):
-                return await interaction.response.send_message("Número inválido. Veja a lista de campos e tente novamente.", ephemeral=True)
-            removed = self.editor.data["fields"].pop(index)
-            await interaction.response.edit_message(content=f"🗑️ Campo **{removed['name']}** removido.", embed=self.editor.make_embed(), view=self.editor)
-            return
-        self.editor.data.update(updated)
-        await interaction.response.edit_message(content="💙 Alterações aplicadas. Confira a prévia antes de publicar.", embed=self.editor.make_embed(), view=self.editor)
+        buttons = [item.strip()[:80] for item in self.buttons_input.value.split(",") if item.strip()][:5]
+        if not buttons:
+            return await interaction.response.send_message("Adicione pelo menos um botão.", ephemeral=True)
+        with db() as c:
+            row = c.execute("SELECT title,description,category,image_url,color FROM zordx_panels WHERE id=? AND guild_id=?", (self.panel_id, self.guild_id)).fetchone()
+        if not row:
+            return await interaction.response.send_message("Esse painel não foi encontrado.", ephemeral=True)
+        channel = interaction.guild.get_channel(self.channel_id) if interaction.guild else None
+        try:
+            if not isinstance(channel, discord.TextChannel):
+                return await interaction.response.send_message("O canal original não foi encontrado.", ephemeral=True)
+            message = await channel.fetch_message(self.message_id)
+            await message.edit(embed=panel_embed(row[0], row[1], row[2], row[3], row[4]), view=PanelActionView(buttons))
+            with db() as c:
+                c.execute("UPDATE zordx_panels SET buttons_json=? WHERE id=? AND guild_id=?", (json.dumps(buttons, ensure_ascii=False), self.panel_id, self.guild_id))
+            await interaction.response.send_message("✅ Botões atualizados na mensagem original.", ephemeral=True)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+            log.exception("Falha ao atualizar botões: %s", exc)
+            await interaction.response.send_message("Não consegui atualizar os botões. Confira as permissões do bot.", ephemeral=True)
 
 
-class EmbedDesignerView(discord.ui.View):
+class EditButtonsView(discord.ui.View):
+    def __init__(self, panel_id, guild_id, channel_id, message_id, buttons):
+        super().__init__(timeout=180)
+        self.panel_id, self.guild_id, self.channel_id, self.message_id, self.buttons = panel_id, guild_id, channel_id, message_id, buttons
+
+    @discord.ui.button(label="Editar botões", style=discord.ButtonStyle.primary, emoji="🔘")
+    async def edit_buttons(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(EditButtonsModal(self.panel_id, self.guild_id, self.channel_id, self.message_id, self.buttons))
+
+
+class TicketCloseView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=900)
-        self.data = {"title": "", "description": "", "color": "#2563EB", "title_url": "", "author": "",
-                     "author_icon": "", "author_url": "", "thumbnail": "", "image": "",
-                     "footer": f"{SHOP_NAME} • ZORDX STORE", "footer_icon": "", "timestamp": False, "fields": []}
+        super().__init__(timeout=None)
 
-    def make_embed(self):
-        raw = str(self.data.get("color", "#2563EB")).lstrip("#")
-        try: color = discord.Color(int(raw, 16))
-        except ValueError: color = discord.Color.blue()
-        card = discord.Embed(title=self.data.get("title") or None, description=self.data.get("description") or None,
-                             color=color, url=self.data.get("title_url") or None,
-                             timestamp=datetime.now(timezone.utc) if self.data.get("timestamp") else None)
-        if self.data.get("author"):
-            card.set_author(name=self.data["author"], icon_url=self.data.get("author_icon") or None,
-                            url=self.data.get("author_url") or None)
-        if self.data.get("thumbnail"): card.set_thumbnail(url=self.data["thumbnail"])
-        if self.data.get("image"): card.set_image(url=self.data["image"])
-        if self.data.get("footer") or self.data.get("footer_icon"):
-            card.set_footer(text=self.data.get("footer") or "\u200b", icon_url=self.data.get("footer_icon") or None)
-        for item in self.data.get("fields", [])[:25]:
-            card.add_field(name=item["name"], value=item["value"], inline=item.get("inline", False))
-        return card
-
-    async def edit_action(self, interaction, action):
-        await interaction.response.send_modal(EmbedActionModal(self, action))
-
-    @discord.ui.button(label="Título", emoji="📝", style=discord.ButtonStyle.primary, row=0)
-    async def title_button(self, interaction, button): await self.edit_action(interaction, "title")
-    @discord.ui.button(label="Descrição", emoji="📄", style=discord.ButtonStyle.primary, row=0)
-    async def description_button(self, interaction, button): await self.edit_action(interaction, "description")
-    @discord.ui.button(label="Cor", emoji="🎨", style=discord.ButtonStyle.primary, row=0)
-    async def color_button(self, interaction, button): await self.edit_action(interaction, "color")
-    @discord.ui.button(label="URL do título", emoji="🔗", style=discord.ButtonStyle.secondary, row=0)
-    async def title_url_button(self, interaction, button): await self.edit_action(interaction, "title_url")
-    @discord.ui.button(label="Autor", emoji="✍️", style=discord.ButtonStyle.secondary, row=1)
-    async def author_button(self, interaction, button): await self.edit_action(interaction, "author")
-    @discord.ui.button(label="Miniatura", emoji="🖼️", style=discord.ButtonStyle.secondary, row=1)
-    async def thumbnail_button(self, interaction, button): await self.edit_action(interaction, "thumbnail")
-    @discord.ui.button(label="Imagem principal", emoji="🌄", style=discord.ButtonStyle.secondary, row=1)
-    async def image_button(self, interaction, button): await self.edit_action(interaction, "image")
-    @discord.ui.button(label="Rodapé", emoji="🔻", style=discord.ButtonStyle.secondary, row=1)
-    async def footer_button(self, interaction, button): await self.edit_action(interaction, "footer")
-    @discord.ui.button(label="Adicionar campo", emoji="➕", style=discord.ButtonStyle.primary, row=2)
-    async def add_field_button(self, interaction, button): await interaction.response.send_modal(EmbedFieldModal(self))
-    @discord.ui.button(label="Remover campo", emoji="➖", style=discord.ButtonStyle.secondary, row=2)
-    async def remove_field_button(self, interaction, button):
-        if not self.data["fields"]: return await interaction.response.send_message("Este embed ainda não tem campos.", ephemeral=True)
-        listing = "\n".join(f"**{i+1}.** {f['name']}" for i, f in enumerate(self.data["fields"]))
-        await interaction.response.send_message(f"**Campos atuais**\n{listing}\nDigite o número para remover:", view=EmbedRemoveFieldView(self), ephemeral=True)
-    @discord.ui.button(label="Data/hora", emoji="🕒", style=discord.ButtonStyle.secondary, row=2)
-    async def timestamp_button(self, interaction, button):
-        self.data["timestamp"] = not self.data.get("timestamp", False)
-        await interaction.response.edit_message(content=f"🕒 Data/hora: **{'ativada' if self.data['timestamp'] else 'desativada'}**.", embed=self.make_embed(), view=self)
-    @discord.ui.button(label="Prévia", emoji="👁️", style=discord.ButtonStyle.success, row=3)
-    async def preview_button(self, interaction, button):
-        await interaction.response.edit_message(content="👁️ **Prévia do Embed**", embed=self.make_embed(), view=self)
-    @discord.ui.button(label="Publicar", emoji="📤", style=discord.ButtonStyle.success, row=3)
-    async def publish_button(self, interaction, button):
-        if not self.data.get("title") and not self.data.get("description") and not self.data.get("fields"):
-            return await interaction.response.send_message("Preencha ao menos título, descrição ou um campo antes de publicar.", ephemeral=True)
-        await interaction.response.send_message("Selecione o canal onde deseja publicar o embed:", view=EmbedPublishView(self), ephemeral=True)
+    @discord.ui.button(label="Fechar ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="zordx:ticket:close")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
+            return await interaction.response.send_message("Este botão só funciona dentro de um ticket.", ephemeral=True)
+        with db() as c:
+            row = c.execute("SELECT user_id FROM zordx_tickets WHERE channel_id=? AND guild_id=? AND status='Aberto'", (interaction.channel.id, interaction.guild_id)).fetchone()
+        if not row:
+            return await interaction.response.send_message("Este ticket já foi fechado ou não está registrado.", ephemeral=True)
+        owner_id = int(row[0])
+        if interaction.user.id != owner_id and not is_staff(interaction):
+            return await interaction.response.send_message("Só quem abriu o ticket ou a equipe pode fechá-lo.", ephemeral=True)
+        await interaction.response.send_message("🔒 Ticket será fechado em alguns segundos.", ephemeral=False)
+        log_channel_id = int(cfg(interaction.guild_id, "ticket_logs_channel_id", "0") or 0)
+        log_channel = interaction.guild.get_channel(log_channel_id)
+        if isinstance(log_channel, discord.TextChannel):
+            try:
+                await log_channel.send(f"🔒 Ticket fechado: {interaction.channel.name}\nAberto por: <@{owner_id}>\nFechado por: {interaction.user.mention}")
+            except discord.HTTPException:
+                pass
+        with db() as c:
+            c.execute("UPDATE zordx_tickets SET status='Fechado', closed_at=? WHERE channel_id=?", (datetime.now(timezone.utc).isoformat(), interaction.channel.id))
+        try:
+            await interaction.channel.delete(reason=f"Ticket fechado por {interaction.user}")
+        except discord.Forbidden:
+            await interaction.followup.send("Não tenho permissão para apagar este canal. Confira Manage Channels.", ephemeral=True)
 
 
-class EmbedRemoveFieldView(discord.ui.View):
-    def __init__(self, editor): super().__init__(timeout=120); self.editor = editor
-    @discord.ui.button(label="Escolher número", emoji="🗑️", style=discord.ButtonStyle.danger)
-    async def remove(self, interaction, button): await interaction.response.send_modal(EmbedActionModal(self.editor, "field_remove"))
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Abrir ticket", style=discord.ButtonStyle.primary, emoji="🎫", custom_id="zordx:ticket:open")
+    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message("Este painel só funciona dentro de um servidor.", ephemeral=True)
+        category_id = int(cfg(guild.id, "ticket_category_id", "0") or 0)
+        support_role_id = int(cfg(guild.id, "ticket_support_role_id", "0") or 0)
+        category = guild.get_channel(category_id) if category_id else None
+        support_role = guild.get_role(support_role_id) if support_role_id else None
+        if not isinstance(category, discord.CategoryChannel):
+            return await interaction.response.send_message("Os tickets ainda não estão configurados. Peça à equipe para usar `/config-ticket`.", ephemeral=True)
+        with db() as c:
+            existing = c.execute("SELECT channel_id FROM zordx_tickets WHERE guild_id=? AND user_id=? AND status='Aberto'", (guild.id, interaction.user.id)).fetchall()
+        active_channels = [guild.get_channel(int(channel_id)) for (channel_id,) in existing]
+        active_channels = [channel for channel in active_channels if isinstance(channel, discord.TextChannel)]
+        limit = max(1, min(5, int(cfg(guild.id, "ticket_open_limit", "1") or 1)))
+        if len(active_channels) >= limit:
+            mentions = ", ".join(channel.mention for channel in active_channels[:5])
+            return await interaction.response.send_message(f"Você atingiu o limite de {limit} ticket(s) aberto(s). {mentions}", ephemeral=True)
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
+        }
+        if support_role:
+            overwrites[support_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        base = ''.join(ch.lower() if ch.isalnum() else '-' for ch in interaction.user.name).strip('-')[:40] or 'usuario'
+        try:
+            channel = await guild.create_text_channel(f"ticket-{base}", category=category, overwrites=overwrites, reason=f"Ticket aberto por {interaction.user}")
+            with db() as c:
+                c.execute("INSERT INTO zordx_tickets(guild_id,channel_id,user_id) VALUES(?,?,?)", (guild.id, channel.id, interaction.user.id))
+            greeting = cfg(guild.id, "ticket_greeting", "Explique como podemos ajudar. A equipe responderá assim que possível.")
+            mention_role = support_role.mention if support_role else "Equipe de suporte"
+            embed = discord.Embed(title="🎫 Atendimento aberto", description=f"Olá {interaction.user.mention}!\n\n{greeting}", color=color_from(DEFAULT_COLOR))
+            embed.set_footer(text=f"{SHOP_NAME} • Sistema de tickets")
+            await channel.send(content=f"{interaction.user.mention} • {mention_role}", embed=embed, view=TicketCloseView())
+            await interaction.response.send_message(f"✅ Seu ticket foi criado: {channel.mention}", ephemeral=True)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            log.exception("Não foi possível criar ticket: %s", exc)
+            await interaction.response.send_message("Não consegui criar o ticket. Confira as permissões do bot e da categoria.", ephemeral=True)
+
+
+# Grupos para que os nomes apareçam como /add painel, /editar painel, /tirar cupom e /girar produto.
+add_group = app_commands.Group(name="add", description="Adicionar itens à loja")
+edit_group = app_commands.Group(name="editar", description="Editar painéis da loja")
+remove_group = app_commands.Group(name="tirar", description="Remover itens da loja")
+spin_group = app_commands.Group(name="girar", description="Gerenciar produtos da loja")
+embed_group = app_commands.Group(name="embed", description="Criar embeds personalizados")
+
+
+@embed_group.command(name="criar", description="Criar uma mensagem embed personalizada")
+@app_commands.describe(titulo="Título do embed", descricao="Descrição do embed", cor="Cor hexadecimal, por exemplo 8B35FF", imagem="URL opcional da imagem")
+@staff_only()
+async def embed_criar(interaction: discord.Interaction, titulo: str, descricao: str, cor: str = "8B35FF", imagem: str = ""):
+    if imagem and not imagem.startswith(("https://", "http://")):
+        return await interaction.response.send_message("A imagem precisa ser um link HTTP ou HTTPS.", ephemeral=True)
+    e = panel_embed(titulo, descricao, "Embed personalizado", imagem, cor)
+    await interaction.response.send_message("Prévia do embed:", embed=e, ephemeral=True, view=EmbedPublishView(interaction.guild_id, titulo, descricao, cor, imagem, interaction.user.id))
 
 
 class EmbedPublishView(discord.ui.View):
-    def __init__(self, editor): super().__init__(timeout=120); self.add_item(EmbedPublishChannelSelect(editor))
+    def __init__(self, guild_id, title, description, color, image, creator_id):
+        super().__init__(timeout=180)
+        self.guild_id, self.title_text, self.description_text, self.color, self.image, self.creator_id = guild_id, title, description, color, image, creator_id
+    @discord.ui.button(label="Publicar neste canal", style=discord.ButtonStyle.success)
+    async def publish_embed(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.creator_id and not is_staff(interaction):
+            return await interaction.response.send_message("Somente quem criou ou a equipe pode publicar.", ephemeral=True)
+        await interaction.channel.send(embed=panel_embed(self.title_text, self.description_text, "Embed personalizado", self.image, self.color))
+        await interaction.response.send_message("✅ Embed publicado.", ephemeral=True)
 
 
-class EmbedPublishChannelSelect(discord.ui.ChannelSelect):
-    def __init__(self, editor): super().__init__(placeholder="Escolha o canal de destino", channel_types=[discord.ChannelType.text], min_values=1, max_values=1); self.editor = editor
-    async def callback(self, interaction):
-        target = self.values[0]
-        try: await target.send(embed=self.editor.make_embed())
-        except discord.Forbidden: return await interaction.response.send_message("Não tenho permissão para publicar nesse canal.", ephemeral=True)
-        except discord.HTTPException: return await interaction.response.send_message("O Discord recusou o embed. Confira URLs e limites dos campos.", ephemeral=True)
-        await interaction.response.send_message(f"✅ Embed publicado em {target.mention}.", ephemeral=True)
+@add_group.command(name="painel", description="Criar um painel de loja do zero")
+@app_commands.describe(titulo="Nome do painel", descricao="Texto exibido no painel", categoria="Categoria do painel", canal="Canal onde publicar", imagem="URL opcional da imagem", cor="Cor hexadecimal", botoes="Nomes separados por vírgula; padrão: Ver produtos,Cupons,Suporte")
+@staff_only()
+async def add_painel(interaction: discord.Interaction, titulo: str, descricao: str, categoria: str, canal: discord.TextChannel, imagem: str = "", cor: str = "8B35FF", botoes: str = "Ver produtos,Cupons,Suporte"):
+    if imagem and not imagem.startswith(("https://", "http://")):
+        return await interaction.response.send_message("A imagem precisa ser um link HTTP ou HTTPS.", ephemeral=True)
+    buttons = [x.strip()[:80] for x in botoes.split(",") if x.strip()][:5]
+    if not buttons:
+        buttons = ["Ver produtos", "Cupons", "Suporte"]
+    e = panel_embed(titulo, descricao, categoria, imagem, cor)
+    view = PublishPanelView(interaction.guild_id, canal.id, titulo, descricao, categoria, imagem, cor, buttons, interaction.user.id)
+    await interaction.response.send_message(f"Confira a prévia abaixo. O painel será publicado em {canal.mention} somente quando você confirmar.", embed=e, view=view, ephemeral=True)
 
 
-@bot.tree.command(name="embed", description="Abre o novo editor interativo de embeds.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-async def embed_interativo(interaction: discord.Interaction):
-    view = EmbedDesignerView()
-    await interaction.response.send_message("💙 **Editor de Embed — ZORDX STORE**\nEdite o conteúdo e confira a prévia antes de publicar.",
-                                            embed=view.make_embed(), view=view, ephemeral=True)
-
-
-@bot.tree.command(name="embed_criar", description="Cria e publica um embed personalizado.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-@app_commands.describe(titulo="Título do embed", descricao="Texto do embed",
-                       canal="Canal onde publicar (opcional)", cor="Cor hexadecimal, exemplo #ff0000")
-async def embed_criar(interaction: discord.Interaction, titulo: str, descricao: str,
-                      canal: discord.TextChannel = None, cor: str = "#5865F2"):
-    try:
-        raw = cor.strip().lstrip("#")
-        if len(raw) != 6:
-            raise ValueError
-        color = discord.Color(int(raw, 16))
-    except ValueError:
-        return await interaction.response.send_message(
-            "Cor inválida. Use formato hexadecimal como #ff0000.", ephemeral=True
-        )
-    target = canal or interaction.channel
-    await target.send(embed=embed(titulo, descricao, color))
-    await interaction.response.send_message(f"Embed publicado em {target.mention}.", ephemeral=True)
-
-
-@bot.tree.command(name="addpainel", description="Publica o painel de produtos da loja.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-@app_commands.describe(canal="Canal onde publicar (opcional)")
-async def addpainel(interaction: discord.Interaction, canal: discord.TextChannel = None):
-    target = canal or interaction.channel
-    e = embed(
-        f"🛍️ {SHOP_NAME} | Painel de Vendas",
-        "Confira as novidades e procure a equipe pelo sistema de tickets quando precisar de atendimento.\n\n"
-        "💙 Obrigado por escolher a ZORDX STORE!",
-        color=discord.Color.blue()
-    )
-    e.set_footer(text="ZORDX STORE • Painel de vendas")
-    await target.send(embed=e)
-    await interaction.response.send_message(f"Painel publicado em {target.mention}.", ephemeral=True)
-
-
-@bot.tree.command(name="confi_loja", description="Configura nome e apresentação da loja.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-@app_commands.describe(nome="Nome da loja", cor="Cor hexadecimal, exemplo #ff0000")
-async def confi_loja(interaction: discord.Interaction, nome: str, cor: str = "#5865F2"):
-    try:
-        raw = cor.strip().lstrip("#")
-        if len(raw) != 6:
-            raise ValueError
-        int(raw, 16)
-    except ValueError:
-        return await interaction.response.send_message("Cor inválida. Use #ff0000, por exemplo.", ephemeral=True)
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute("INSERT OR REPLACE INTO shop_config(key,value) VALUES('shop_name',?)", (nome[:100],))
-        c.execute("INSERT OR REPLACE INTO shop_config(key,value) VALUES('shop_color',?)", (raw.lower(),))
-    global SHOP_NAME, SHOP_COLOR
-    SHOP_NAME = nome[:100]
-    SHOP_COLOR = raw.lower()
-    await interaction.response.send_message(
-        f"Configuração salva: **{discord.utils.escape_markdown(nome[:100])}**. "
-        "O nome e a cor serão mantidos após reiniciar o bot.",
-        ephemeral=True
-    )
-
-
-cupom_group = app_commands.Group(name="cupom", description="Gerencia os cupons da loja")
-
-
-@cupom_group.command(name="criar", description="Cria um cupom de desconto.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-@app_commands.describe(codigo="Código do cupom", desconto="Desconto percentual de 1 a 90",
-                       usos="Quantidade de usos disponíveis")
-async def cupom_criar(interaction: discord.Interaction, codigo: str,
-                      desconto: app_commands.Range[int, 1, 90],
-                      usos: app_commands.Range[int, 1, 100000] = 1):
-    code = codigo.strip().upper()
-    if not code or len(code) > 32 or not code.replace("-", "").replace("_", "").isalnum():
-        return await interaction.response.send_message(
-            "Código inválido. Use letras, números, hífen ou sublinhado (até 32 caracteres).",
-            ephemeral=True
-        )
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute(
-            "INSERT OR REPLACE INTO coupons(code,percent,uses_left,created_by) VALUES(?,?,?,?)",
-            (code, int(desconto), int(usos), interaction.user.id)
-        )
-    await interaction.response.send_message(
-        f"🎟️ Cupom **{code}** criado: **{desconto}%** de desconto, **{usos}** uso(s).",
-        ephemeral=True
-    )
-
-
-@cupom_group.command(name="listar", description="Lista os cupons cadastrados.")
-@app_commands.guild_only()
-async def cupom_listar(interaction: discord.Interaction):
-    with sqlite3.connect(DB_PATH) as c:
-        rows = c.execute("SELECT code,percent,uses_left FROM coupons ORDER BY code LIMIT 25").fetchall()
+@edit_group.command(name="painel", description="Editar qualquer painel criado por este bot no servidor")
+@premium_only()
+async def editar_painel(interaction: discord.Interaction):
+    with db() as c:
+        rows = c.execute("SELECT id,title,channel_id FROM zordx_panels WHERE guild_id=? ORDER BY id DESC", (interaction.guild_id,)).fetchall()
     if not rows:
-        return await interaction.response.send_message("🎟️ Ainda não há cupons cadastrados.", ephemeral=True)
-    e = embed("🎟️ Cupons — " + SHOP_NAME, "Cupons cadastrados e usos restantes:", color=discord.Color.blue())
-    for code, percent, uses in rows:
-        e.add_field(name=f"{code} — {percent}%", value=f"Usos restantes: **{uses}**", inline=True)
-    await interaction.response.send_message(embed=e, ephemeral=True)
+        return await interaction.response.send_message("Ainda não há painéis criados por este bot registrados neste servidor. Use `/add painel` primeiro.", ephemeral=True)
+    await interaction.response.send_message("Selecione o painel. As alterações serão aplicadas à mensagem original, sem criar uma cópia.", view=PanelSelectView(rows), ephemeral=True)
 
 
-bot.tree.add_command(cupom_group)
-
-
-@bot.tree.command(name="nick", description="Altera o apelido de um membro.")
-@app_commands.guild_only()
-@app_commands.checks.has_permissions(manage_nicknames=True)
-@app_commands.describe(membro="Membro", apelido="Novo apelido; deixe vazio para remover")
-async def nick(interaction: discord.Interaction, membro: discord.Member, apelido: str = ""):
-    if membro.id == interaction.guild.owner_id:
-        return await interaction.response.send_message("Não posso alterar o apelido do dono do servidor.", ephemeral=True)
-    if interaction.guild.owner_id != interaction.user.id and membro.top_role >= interaction.user.top_role:
-        return await interaction.response.send_message("O cargo desse membro é igual ou superior ao seu.", ephemeral=True)
-    try:
-        await membro.edit(nick=apelido[:32] or None, reason=f"Alterado por {interaction.user}")
-        await interaction.response.send_message(
-            f"Apelido de {membro.mention} atualizado.", ephemeral=True
-        )
-    except discord.Forbidden:
-        await interaction.response.send_message("O bot não tem permissão ou cargo suficiente.", ephemeral=True)
-
-
-@bot.tree.command(name="lock", description="Bloqueia ou desbloqueia mensagens no canal.")
-@app_commands.guild_only()
-@app_commands.checks.has_permissions(manage_channels=True)
-@app_commands.describe(acao="Bloquear ou desbloquear mensagens")
-@app_commands.choices(acao=[
-    app_commands.Choice(name="bloquear", value="bloquear"),
-    app_commands.Choice(name="desbloquear", value="desbloquear")
-])
-async def lock(interaction: discord.Interaction, acao: app_commands.Choice[str]):
-    channel = interaction.channel
-    if not isinstance(channel, discord.TextChannel):
-        return await interaction.response.send_message("Use em um canal de texto.", ephemeral=True)
-    try:
-        overwrite = channel.overwrites_for(interaction.guild.default_role)
-        overwrite.send_messages = False if acao.value == "bloquear" else None
-        await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite,
-                                      reason=f"Canal {acao.value} por {interaction.user}")
-        message = "🔒 Canal bloqueado." if acao.value == "bloquear" else "🔓 Canal desbloqueado."
-        await interaction.response.send_message(message)
-    except discord.Forbidden:
-        await interaction.response.send_message("O bot não tem permissão para editar o canal.", ephemeral=True)
-
-
-@bot.tree.command(name="limpar", description="Apaga mensagens recentes deste canal.")
-@app_commands.guild_only()
-@app_commands.checks.has_permissions(manage_messages=True)
-@app_commands.describe(quantidade="Quantidade de mensagens (1 a 100)")
-async def limpar(interaction: discord.Interaction, quantidade: app_commands.Range[int, 1, 100]):
-    if not isinstance(interaction.channel, discord.TextChannel):
-        return await interaction.response.send_message("Use em um canal de texto.", ephemeral=True)
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    try:
-        deleted = await interaction.channel.purge(limit=int(quantidade))
-        await interaction.followup.send(f"🧹 Apaguei {len(deleted)} mensagem(ns).", ephemeral=True)
-    except discord.Forbidden:
-        await interaction.followup.send("O bot precisa da permissão Gerenciar Mensagens.", ephemeral=True)
-
-
-@bot.tree.command(name="limpar_canal", description="Apaga o histórico recriando o canal.")
-@app_commands.guild_only()
-@app_commands.checks.has_permissions(manage_channels=True, manage_messages=True)
-@app_commands.describe(confirmar="Digite CONFIRMAR para recriar este canal")
-async def limpar_canal(interaction: discord.Interaction, confirmar: str):
-    if confirmar != "CONFIRMAR":
-        return await interaction.response.send_message(
-            "Ação cancelada. Para confirmar, use exatamente `CONFIRMAR`.", ephemeral=True
-        )
-    channel = interaction.channel
-    if not isinstance(channel, discord.TextChannel):
-        return await interaction.response.send_message("Use em um canal de texto.", ephemeral=True)
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    try:
-        new_channel = await channel.clone(reason=f"Canal limpo por {interaction.user}")
-        await new_channel.edit(position=channel.position)
-        await channel.delete(reason=f"Canal limpo por {interaction.user}")
-        await new_channel.send(f"🧹 Canal recriado por {interaction.user.mention}. O histórico anterior foi removido.")
-        await interaction.followup.send(f"Canal recriado: {new_channel.mention}", ephemeral=True)
-    except discord.Forbidden:
-        await interaction.followup.send("O bot precisa de permissões para gerenciar canais.", ephemeral=True)
-
-
-@bot.tree.command(name="perfil", description="Mostra seu perfil ou o de outro membro.")
-@app_commands.guild_only()
-@app_commands.describe(membro="Membro opcional")
-async def perfil(interaction: discord.Interaction, membro: discord.Member = None):
-    member = membro or interaction.user
-    with sqlite3.connect(DB_PATH) as c:
-        row = c.execute(
-            "SELECT bio,points FROM member_profiles WHERE guild_id=? AND user_id=?",
-            (interaction.guild_id, member.id)
-        ).fetchone()
-        rank_row = c.execute(
-            "SELECT rank FROM member_ranks WHERE guild_id=? AND user_id=?",
-            (interaction.guild_id, member.id)
-        ).fetchone()
-    bio = row[0] if row else "Ainda sem biografia."
-    points = row[1] if row else 0
-    rank = rank_row[0] if rank_row else "Sem rank definido"
-    e = embed(f"👤 Perfil de {member.display_name}", bio)
-    e.set_thumbnail(url=member.display_avatar.url)
-    e.add_field(name="Rank", value=rank, inline=True)
-    e.add_field(name="Pontos", value=str(points), inline=True)
-    await interaction.response.send_message(embed=e)
-
-
-@bot.tree.command(name="rankset", description="Define o rank de um membro.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-@app_commands.describe(membro="Membro", rank="Nome do rank")
-async def rankset(interaction: discord.Interaction, membro: discord.Member, rank: str):
-    rank = rank.strip()[:80]
-    if not rank:
-        return await interaction.response.send_message("Informe um rank.", ephemeral=True)
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute(
-            "INSERT OR REPLACE INTO member_ranks(guild_id,user_id,rank,updated_by) VALUES(?,?,?,?)",
-            (interaction.guild_id, membro.id, rank, interaction.user.id)
-        )
-    await interaction.response.send_message(
-        f"🏅 Rank de {membro.mention} definido como **{discord.utils.escape_markdown(rank)}**.",
-        ephemeral=True
-    )
-
-
-@bot.tree.command(name="registrar_venda", description="Registra uma venda para o relatório de rendimentos.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-@app_commands.describe(produto="Nome do produto", valor="Valor total recebido em reais",
-                       quantidade="Quantidade vendida")
-async def registrar_venda(interaction: discord.Interaction, produto: str,
-                           valor: app_commands.Range[float, 0.01, 100000000.0],
-                           quantidade: app_commands.Range[int, 1, 1000000] = 1):
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute(
-            "INSERT INTO sales(product_name,amount,quantity,seller_id) VALUES(?,?,?,?)",
-            (produto[:100], float(valor), int(quantidade), interaction.user.id)
-        )
-        c.execute(
-            "UPDATE shop_products SET stock=MAX(0,stock-?) WHERE name=? COLLATE NOCASE",
-            (int(quantidade), produto.strip())
-        )
-    await interaction.response.send_message(
-        f"✅ Venda registrada: **{discord.utils.escape_markdown(produto)}**, "
-        f"{quantidade} unidade(s), total {money(valor)}.", ephemeral=True
-    )
-
-
-@bot.tree.command(name="rendimentos", description="Mostra os rendimentos registrados da loja.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-async def rendimentos(interaction: discord.Interaction):
-    with sqlite3.connect(DB_PATH) as c:
-        total, sales_count, units = c.execute(
-            "SELECT COALESCE(SUM(amount),0),COUNT(*),COALESCE(SUM(quantity),0) FROM sales"
-        ).fetchone()
-        rows = c.execute(
-            "SELECT product_name,SUM(amount),SUM(quantity) FROM sales "
-            "GROUP BY product_name ORDER BY SUM(amount) DESC LIMIT 10"
-        ).fetchall()
-    description = (
-        f"**Total registrado:** {money(total)}\n"
-        f"**Registros de venda:** {sales_count}\n"
-        f"**Unidades vendidas:** {units}\n\n"
-        "Esses valores consideram somente vendas registradas com `/registrar_venda`."
-    )
-    e = embed("📈 Rendimentos — " + SHOP_NAME, description)
-    for name, amount, qty in rows:
-        e.add_field(name=str(name)[:256], value=f"{money(amount)} • {qty} unidade(s)", inline=False)
-    await interaction.response.send_message(embed=e, ephemeral=True)
-
-
-@bot.tree.command(name="aviso", description="Publica um aviso da loja.")
-@app_commands.describe(titulo="Título", mensagem="Texto do aviso")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-async def announce(interaction: discord.Interaction, titulo: str, mensagem: str):
-    await interaction.channel.send(embed=embed("📢 " + titulo[:240], mensagem[:4000]))
-    await interaction.response.send_message("Aviso publicado.", ephemeral=True)
-
-
-@bot.tree.command(name="advertir", description="Registra advertência.")
-@app_commands.describe(membro="Membro", motivo="Motivo")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-async def warn(interaction: discord.Interaction, membro: discord.Member, motivo: str):
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute(
-            "INSERT INTO warnings(guild_id,user_id,moderator_id,reason) VALUES(?,?,?,?)",
-            (interaction.guild_id, membro.id, interaction.user.id, motivo[:1000])
-        )
-        count = c.execute(
-            "SELECT COUNT(*) FROM warnings WHERE guild_id=? AND user_id=?",
-            (interaction.guild_id, membro.id)
-        ).fetchone()[0]
-    await interaction.response.send_message(
-        f"⚠️ {membro.mention} advertido. Total: **{count}**. Motivo: {motivo[:1000]}"
-    )
-
-
-@bot.tree.command(name="advertencias", description="Consulta advertências de membro.")
-@app_commands.describe(membro="Membro")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-async def warnings(interaction: discord.Interaction, membro: discord.Member):
-    with sqlite3.connect(DB_PATH) as c:
-        rows = c.execute(
-            "SELECT reason,moderator_id,created_at FROM warnings WHERE guild_id=? AND user_id=? "
-            "ORDER BY id DESC LIMIT 10", (interaction.guild_id, membro.id)
-        ).fetchall()
-    if not rows:
-        return await interaction.response.send_message("Sem advertências registradas.", ephemeral=True)
-    text = "\n".join(f"• {date}: {reason} (moderador <@{mod_id}>)"
-                     for reason, mod_id, date in rows)
-    await interaction.response.send_message(
-        embed=embed("Advertências — " + str(membro), text), ephemeral=True
-    )
-
-
-@bot.tree.command(name="timeout", description="Aplica timeout temporário.")
-@app_commands.describe(membro="Membro", minutos="De 1 a 40320 minutos", motivo="Motivo")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-async def timeout_member(interaction: discord.Interaction, membro: discord.Member,
-                         minutos: app_commands.Range[int, 1, 40320], motivo: str):
-    if membro.top_role >= interaction.user.top_role and interaction.guild.owner_id != interaction.user.id:
-        return await interaction.response.send_message("Cargo igual ou superior ao seu.", ephemeral=True)
-    try:
-        await membro.timeout(timedelta(minutes=minutos), reason=motivo[:500])
-        await interaction.response.send_message(
-            f"🔇 {membro.mention} recebeu timeout de {minutos} minuto(s). Motivo: {motivo}"
-        )
-    except discord.Forbidden:
-        await interaction.response.send_message("Sem permissão para aplicar timeout.", ephemeral=True)
-
-
-@bot.tree.command(name="expulsar", description="Expulsa um membro.")
-@app_commands.describe(membro="Membro", motivo="Motivo")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-async def kick(interaction: discord.Interaction, membro: discord.Member, motivo: str):
-    if membro.id == interaction.user.id or membro.id == interaction.guild.owner_id:
-        return await interaction.response.send_message("Não é possível expulsar essa pessoa.", ephemeral=True)
-    if membro.top_role >= interaction.user.top_role and interaction.guild.owner_id != interaction.user.id:
-        return await interaction.response.send_message("Cargo igual ou superior ao seu.", ephemeral=True)
-    try:
-        await membro.kick(reason=motivo[:500])
-        await interaction.response.send_message(f"👢 {membro} foi expulso. Motivo: {motivo}")
-    except discord.Forbidden:
-        await interaction.response.send_message("Sem permissão para expulsar.", ephemeral=True)
-
-
-@bot.tree.command(name="banir", description="Bane um membro.")
-@app_commands.describe(membro="Membro", motivo="Motivo")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-async def ban(interaction: discord.Interaction, membro: discord.Member, motivo: str):
-    if membro.id == interaction.user.id or membro.id == interaction.guild.owner_id:
-        return await interaction.response.send_message("Não é possível banir essa pessoa.", ephemeral=True)
-    if membro.top_role >= interaction.user.top_role and interaction.guild.owner_id != interaction.user.id:
-        return await interaction.response.send_message("Cargo igual ou superior ao seu.", ephemeral=True)
-    try:
-        await membro.ban(reason=motivo[:500])
-        await interaction.response.send_message(f"🔨 {membro} foi banido. Motivo: {motivo}")
-    except discord.Forbidden:
-        await interaction.response.send_message("Sem permissão para banir.", ephemeral=True)
-
-
-@bot.tree.command(name="ping", description="Ver latência do bot")
-async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message(f"🏓 Pong! Latência: {round(bot.latency * 1000)} ms")
-
-
-@bot.tree.command(name="ajuda", description="Ver os comandos do bot")
-async def ajuda(interaction: discord.Interaction):
-    text = (
-        "🤖 **ZORDX STORE BOT**\n"
-        "`/ping` — Latência\n`/ajuda` — Ajuda\n`/regras` — Regras\n"
-        "`/config_ticket` — Configuração de tickets\n"
-        "`/embed` — Editor interativo de embeds; `/embed_criar` — Publicar embed simples\n"
-        "`/cupom criar` e `/cupom listar` — Cupons\n"
-        "`/ajuda-vendas`, `/anunciar` — Vendas e anúncios\n"
-        "`/confi_loja` — Configurar apresentação da loja\n"
-        "`/adicionar_produto`, `/addestoque`, `/loja`, `/comprar`, `/saldo`, `/adicionar_saldo` — Loja\n"
-        "`/limpar`, `/limpar_canal`, `/lock`, `/nick`, `/desbanir`, `/silenciar`, `/dessilenciar`, `/punicoes` — Moderação\n"
-        "`/perfil`, `/rankset` — Perfil e rank\n"
-        "`/registrar_venda`, `/rendimentos` — Vendas e rendimentos\n"
-        "`/aviso`, `/advertir`, `/advertencias`, `/timeout`, `/expulsar`, `/banir` — Equipe"
-    )
+@bot.tree.command(name="ajuda-vendas", description="Ajuda para usar os comandos de vendas")
+async def ajuda_vendas(interaction: discord.Interaction):
+    text = ("**Comandos da ZORDX STORE BOT**\n"
+            "`/produtos` — ver catálogo e estoque\n`/addproduto` — cadastrar produto (equipe)\n"
+            "`/addestoque` — adicionar estoque (equipe)\n`/girar produto` — remover produto (equipe)\n"
+            "`/add painel` — criar painel com prévia\n`/editar painel` — editar painel existente (Premium)\n"
+            "`/cupons` — listar cupons (Premium)\n`/addcupom` — criar cupom (Premium)\n"
+            "`/tirar cupom` — remover cupom (Premium)\n`/saldo` e `/sacar` — consultar saldo e solicitar saque\n`/config` — configurar a loja\n`/config-ticket` — configurar categoria, suporte, logs e painel de tickets.")
     await interaction.response.send_message(text, ephemeral=True)
 
 
-@bot.tree.error
-async def command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    logging.error("Erro de comando: %r", error)
-    if isinstance(error, app_commands.MissingPermissions):
-        message = "Você não tem as permissões necessárias para esse comando."
-    elif isinstance(error, app_commands.CheckFailure):
-        message = "Comando restrito à equipe ou sem permissão necessária."
+@bot.tree.command(name="produtos", description="Mostrar catálogo, preços e estoque")
+async def produtos(interaction: discord.Interaction):
+    rows = get_products()
+    if not rows:
+        return await interaction.response.send_message("Ainda não há produtos cadastrados.", ephemeral=True)
+    e = discord.Embed(title=f"🛍️ Produtos — {SHOP_NAME}", color=color_from(DEFAULT_COLOR))
+    for name, description, price, stock, link in rows[:25]:
+        value = f"**Preço:** {money(price)}\n**Estoque:** {stock}\n{description or 'Sem descrição'}"
+        if link:
+            value += f"\n[Ver produto]({link})"
+        e.add_field(name=name[:256], value=value[:1024], inline=False)
+    await interaction.response.send_message(embed=e, ephemeral=False)
+
+
+@bot.tree.command(name="addproduto", description="Cadastrar um produto na loja")
+@app_commands.describe(nome="Nome do produto", preco="Preço em reais", estoque="Quantidade inicial", descricao="Descrição", link="Link opcional do produto")
+@staff_only()
+async def addproduto(interaction: discord.Interaction, nome: str, preco: app_commands.Range[float, 0.01, 100000000.0], estoque: app_commands.Range[int, 0, 100000000], descricao: str = "", link: str = ""):
+    if link and not link.startswith(("https://", "http://")):
+        return await interaction.response.send_message("O link precisa começar com http:// ou https://.", ephemeral=True)
+    try:
+        with db() as c:
+            c.execute("INSERT INTO shop_products(name,description,price,stock,link) VALUES(?,?,?,?,?)", (nome.strip(), descricao[:1000], float(preco), int(estoque), link))
+        await interaction.response.send_message(f"✅ Produto **{nome}** cadastrado por {money(preco)} com estoque {estoque}.", ephemeral=True)
+    except sqlite3.IntegrityError:
+        await interaction.response.send_message("Já existe um produto com esse nome. Use `/addestoque` para adicionar unidades.", ephemeral=True)
+
+
+@bot.tree.command(name="addestoque", description="Adicionar unidades ao estoque de um produto")
+@staff_only()
+async def addestoque(interaction: discord.Interaction, nome: str, quantidade: app_commands.Range[int, 1, 100000000]):
+    with db() as c:
+        cur = c.execute("UPDATE shop_products SET stock=stock+? WHERE name=? COLLATE NOCASE", (int(quantidade), nome.strip()))
+    if cur.rowcount == 0:
+        return await interaction.response.send_message("Não encontrei esse produto. Confira o nome em `/produtos`.", ephemeral=True)
+    await interaction.response.send_message(f"✅ Estoque de **{nome}** aumentado em **{quantidade}** unidade(s).", ephemeral=True)
+
+
+@spin_group.command(name="produto", description="Remover um produto da loja")
+@staff_only()
+async def girar_produto(interaction: discord.Interaction, nome: str):
+    with db() as c:
+        cur = c.execute("DELETE FROM shop_products WHERE name=? COLLATE NOCASE", (nome.strip(),))
+    if cur.rowcount == 0:
+        return await interaction.response.send_message("Não encontrei esse produto.", ephemeral=True)
+    await interaction.response.send_message(f"🗑️ Produto **{nome}** removido do catálogo.", ephemeral=True)
+
+
+@bot.tree.command(name="cupons", description="Listar cupons da loja (Premium)")
+@premium_only()
+async def cupons(interaction: discord.Interaction):
+    with db() as c:
+        rows = c.execute("SELECT code,percent,uses_left FROM coupons ORDER BY code").fetchall()
+    e = discord.Embed(title="🎟️ Cupons da loja", color=color_from(DEFAULT_COLOR))
+    if not rows:
+        e.description = "Nenhum cupom cadastrado."
     else:
-        message = "Não foi possível executar. Confira as permissões do bot e tente novamente."
+        e.description = "\n".join(f"**{code}** — {percent}% de desconto • usos restantes: {uses}" for code, percent, uses in rows[:25])
+    await interaction.response.send_message(embed=e, ephemeral=True)
+
+
+@bot.tree.command(name="addcupom", description="Criar cupom de desconto (Premium)")
+@app_commands.describe(codigo="Código do cupom", desconto="Percentual de desconto", usos="Quantidade de usos permitidos")
+@premium_only()
+async def addcupom(interaction: discord.Interaction, codigo: str, desconto: app_commands.Range[int, 1, 100], usos: app_commands.Range[int, 1, 1000000]):
+    try:
+        with db() as c:
+            c.execute("INSERT INTO coupons(code,percent,uses_left,created_by) VALUES(?,?,?,?)", (codigo.strip().upper(), int(desconto), int(usos), interaction.user.id))
+        await interaction.response.send_message(f"✅ Cupom `{codigo.upper()}` criado: {desconto}% de desconto, {usos} uso(s).", ephemeral=True)
+    except sqlite3.IntegrityError:
+        await interaction.response.send_message("Esse código já existe. Escolha outro.", ephemeral=True)
+
+
+@remove_group.command(name="cupom", description="Remover um cupom da loja (Premium)")
+@premium_only()
+async def tirar_cupom(interaction: discord.Interaction, codigo: str):
+    with db() as c:
+        cur = c.execute("DELETE FROM coupons WHERE code=? COLLATE NOCASE", (codigo.strip(),))
+    if cur.rowcount == 0:
+        return await interaction.response.send_message("Não encontrei esse cupom.", ephemeral=True)
+    await interaction.response.send_message(f"🗑️ Cupom `{codigo}` removido.", ephemeral=True)
+
+
+class RemovePanelSelect(discord.ui.Select):
+    def __init__(self, rows):
+        options = [discord.SelectOption(label=(row[1] or "Painel")[:100], description=f"Canal ID: {row[2]} • Painel #{row[0]}"[:100], value=str(row[0])) for row in rows[:25]]
+        super().__init__(placeholder="Escolha o painel que deseja remover", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        panel_id = int(self.values[0])
+        with db() as c:
+            row = c.execute("SELECT channel_id,message_id,title FROM zordx_panels WHERE id=? AND guild_id=?", (panel_id, interaction.guild_id)).fetchone()
+        if not row:
+            return await interaction.response.send_message("Não encontrei esse painel.", ephemeral=True)
+        channel = interaction.guild.get_channel(row[0]) if interaction.guild else None
+        try:
+            if isinstance(channel, discord.TextChannel):
+                message = await channel.fetch_message(row[1])
+                await message.delete()
+            with db() as c:
+                c.execute("DELETE FROM zordx_panels WHERE id=? AND guild_id=?", (panel_id, interaction.guild_id))
+            await interaction.response.send_message(f"🗑️ O painel **{row[2]}** foi removido.", ephemeral=True)
+        except discord.NotFound:
+            with db() as c:
+                c.execute("DELETE FROM zordx_panels WHERE id=? AND guild_id=?", (panel_id, interaction.guild_id))
+            await interaction.response.send_message("A mensagem já não existia; removi o registro do painel.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("Não tenho permissão para apagar a mensagem original.", ephemeral=True)
+
+
+class RemovePanelView(discord.ui.View):
+    def __init__(self, rows):
+        super().__init__(timeout=180)
+        self.add_item(RemovePanelSelect(rows))
+
+
+@bot.tree.command(name="tirarpainel", description="Remover um painel criado pelo bot")
+@staff_only()
+async def tirarpainel(interaction: discord.Interaction):
+    with db() as c:
+        rows = c.execute("SELECT id,title,channel_id FROM zordx_panels WHERE guild_id=? ORDER BY id DESC", (interaction.guild_id,)).fetchall()
+    if not rows:
+        return await interaction.response.send_message("Não há painéis registrados para remover.", ephemeral=True)
+    await interaction.response.send_message("Selecione o painel. A mensagem original será apagada.", view=RemovePanelView(rows), ephemeral=True)
+
+
+@bot.tree.command(name="entregas", description="Configurar canal de avisos de entrega (Premium)")
+@app_commands.describe(canal="Canal que receberá avisos de entrega; deixe vazio para consultar")
+@premium_only()
+async def entregas(interaction: discord.Interaction, canal: discord.TextChannel = None):
+    if canal:
+        set_cfg(interaction.guild_id, "delivery_channel_id", canal.id)
+        return await interaction.response.send_message(f"✅ Canal de avisos de entrega definido para {canal.mention}.", ephemeral=True)
+    current = int(cfg(interaction.guild_id, "delivery_channel_id", "0") or 0)
+    channel = interaction.guild.get_channel(current) if interaction.guild and current else None
+    await interaction.response.send_message(f"Canal atual de entregas: {channel.mention if channel else 'não configurado'}. Use `/entregas canal:#canal` para definir.", ephemeral=True)
+
+
+@bot.tree.command(name="config", description="Configurar canais e opções da loja")
+@app_commands.describe(canal_loja="Canal padrão da loja", canal_suporte="Canal de suporte", canal_saques="Canal para receber solicitações de saque")
+@staff_only()
+async def config(interaction: discord.Interaction, canal_loja: discord.TextChannel = None, canal_suporte: discord.TextChannel = None, canal_saques: discord.TextChannel = None):
+    changed = []
+    if canal_loja:
+        set_cfg(interaction.guild_id, "shop_channel_id", canal_loja.id); changed.append(f"Canal da loja: {canal_loja.mention}")
+    if canal_suporte:
+        set_cfg(interaction.guild_id, "support_channel_id", canal_suporte.id); changed.append(f"Canal de suporte: {canal_suporte.mention}")
+    if canal_saques:
+        set_cfg(interaction.guild_id, "withdrawal_channel_id", canal_saques.id); changed.append(f"Canal de saques: {canal_saques.mention}")
+    if not changed:
+        shop = interaction.guild.get_channel(int(cfg(interaction.guild_id, "shop_channel_id", "0") or 0)) if interaction.guild else None
+        support = interaction.guild.get_channel(int(cfg(interaction.guild_id, "support_channel_id", "0") or 0)) if interaction.guild else None
+        withdrawal = interaction.guild.get_channel(int(cfg(interaction.guild_id, "withdrawal_channel_id", "0") or 0)) if interaction.guild else None
+        changed = [f"Canal da loja: {shop.mention if shop else 'não definido'}", f"Suporte: {support.mention if support else 'não definido'}", f"Saques: {withdrawal.mention if withdrawal else 'não definido'}"]
+    await interaction.response.send_message("⚙️ **Configuração da loja**\n" + "\n".join(changed), ephemeral=True)
+
+
+@bot.tree.command(name="config-ticket", description="Configurar e publicar o sistema de tickets")
+@app_commands.describe(
+    canal_painel="Canal onde publicar o painel para abrir tickets",
+    categoria="Categoria onde os canais privados serão criados",
+    cargo_suporte="Cargo da equipe que poderá ver e responder tickets",
+    canal_logs="Canal opcional para registrar abertura e fechamento de tickets",
+    titulo="Título exibido no painel de tickets",
+    descricao="Descrição e instruções exibidas no painel",
+    mensagem_boas_vindas="Mensagem exibida dentro de cada ticket",
+    limite_abertos="Máximo de tickets abertos por pessoa (1 a 5)"
+)
+@staff_only()
+async def config_ticket(
+    interaction: discord.Interaction,
+    canal_painel: discord.TextChannel = None,
+    categoria: discord.CategoryChannel = None,
+    cargo_suporte: discord.Role = None,
+    canal_logs: discord.TextChannel = None,
+    titulo: str = None,
+    descricao: str = None,
+    mensagem_boas_vindas: str = None,
+    limite_abertos: app_commands.Range[int, 1, 5] = None
+):
+    guild = interaction.guild
+    if guild is None:
+        return await interaction.response.send_message("Use este comando dentro do servidor.", ephemeral=True)
+    changes = []
+    if categoria:
+        set_cfg(guild.id, "ticket_category_id", categoria.id)
+        changes.append(f"Categoria de tickets: {categoria.name}")
+    if cargo_suporte:
+        set_cfg(guild.id, "ticket_support_role_id", cargo_suporte.id)
+        changes.append(f"Cargo de suporte: {cargo_suporte.mention}")
+    if canal_logs:
+        set_cfg(guild.id, "ticket_logs_channel_id", canal_logs.id)
+        changes.append(f"Canal de logs: {canal_logs.mention}")
+    if titulo:
+        set_cfg(guild.id, "ticket_panel_title", titulo[:256])
+        changes.append(f"Título do painel: {titulo[:256]}")
+    if descricao:
+        set_cfg(guild.id, "ticket_panel_description", descricao[:3500])
+        changes.append("Descrição do painel atualizada")
+    if mensagem_boas_vindas:
+        set_cfg(guild.id, "ticket_greeting", mensagem_boas_vindas[:1000])
+        changes.append("Mensagem de boas-vindas atualizada")
+    if limite_abertos is not None:
+        set_cfg(guild.id, "ticket_open_limit", limite_abertos)
+        changes.append(f"Limite de tickets abertos por pessoa: {limite_abertos}")
+    if canal_painel:
+        panel_title = cfg(guild.id, "ticket_panel_title", "🎫 Central de Atendimento")
+        panel_description = cfg(guild.id, "ticket_panel_description", "Precisa de ajuda? Clique no botão abaixo para abrir um ticket privado com a equipe.")
+        embed = discord.Embed(title=panel_title[:256], description=panel_description[:4000], color=color_from(DEFAULT_COLOR))
+        embed.add_field(name="🔒 Atendimento privado", value="Somente você e a equipe autorizada poderão ver seu ticket.", inline=False)
+        embed.set_footer(text=f"{SHOP_NAME} • Suporte")
+        try:
+            await canal_painel.send(embed=embed, view=TicketPanelView())
+            changes.append(f"Painel publicado em {canal_painel.mention}")
+        except (discord.Forbidden, discord.HTTPException):
+            return await interaction.response.send_message("Não consegui publicar o painel. Confira as permissões do bot no canal.", ephemeral=True)
+    if not changes:
+        category_id = int(cfg(guild.id, "ticket_category_id", "0") or 0)
+        role_id = int(cfg(guild.id, "ticket_support_role_id", "0") or 0)
+        logs_id = int(cfg(guild.id, "ticket_logs_channel_id", "0") or 0)
+        category_obj = guild.get_channel(category_id) if category_id else None
+        role_obj = guild.get_role(role_id) if role_id else None
+        logs_obj = guild.get_channel(logs_id) if logs_id else None
+        changes = [
+            f"Categoria: {category_obj.name if isinstance(category_obj, discord.CategoryChannel) else 'não configurada'}",
+            f"Cargo de suporte: {role_obj.mention if role_obj else 'não configurado'}",
+            f"Canal de logs: {logs_obj.mention if isinstance(logs_obj, discord.TextChannel) else 'não configurado'}",
+            f"Título: {cfg(guild.id, 'ticket_panel_title', '🎫 Central de Atendimento')}",
+            f"Limite por usuário: {cfg(guild.id, 'ticket_open_limit', '1')} ticket(s)"
+        ]
+        changes.append("Para publicar o painel, escolha o parâmetro `canal_painel`.")
+    await interaction.response.send_message("🎫 **Configuração de tickets**\n" + "\n".join(f"• {item}" for item in changes), ephemeral=True)
+
+
+@bot.tree.command(name="saldo", description="Consultar seu saldo disponível para saque")
+async def saldo(interaction: discord.Interaction):
+    with db() as c:
+        row = c.execute("SELECT balance FROM zordx_balances WHERE guild_id=? AND user_id=?", (interaction.guild_id, interaction.user.id)).fetchone()
+    balance = float(row[0]) if row else 0.0
+    await interaction.response.send_message(f"💰 Seu saldo registrado para saque é **{money(balance)}**. O saldo precisa ser atualizado pelo sistema de vendas da loja.", ephemeral=True)
+
+
+@bot.tree.command(name="sacar", description="Solicitar saque do saldo registrado")
+@app_commands.describe(valor="Valor que deseja sacar em reais")
+async def sacar(interaction: discord.Interaction, valor: app_commands.Range[float, 0.01, 100000000.0]):
+    with db() as c:
+        row = c.execute("SELECT balance FROM zordx_balances WHERE guild_id=? AND user_id=?", (interaction.guild_id, interaction.user.id)).fetchone()
+    balance = float(row[0]) if row else 0.0
+    if float(valor) > balance:
+        return await interaction.response.send_message(f"Saldo insuficiente. Seu saldo registrado é {money(balance)}.", ephemeral=True)
+    with db() as c:
+        c.execute("INSERT INTO zordx_withdrawals(guild_id,user_id,amount) VALUES(?,?,?)", (interaction.guild_id, interaction.user.id, float(valor)))
+        c.execute("UPDATE zordx_balances SET balance=balance-? WHERE guild_id=? AND user_id=?", (float(valor), interaction.guild_id, interaction.user.id))
+    await interaction.response.send_message(f"✅ Solicitação de saque de **{money(valor)}** registrada. A equipe precisa revisar e concluir o pagamento.", ephemeral=True)
+    channel_id = int(cfg(interaction.guild_id, "withdrawal_channel_id", "0") or 0)
+    channel = interaction.guild.get_channel(channel_id) if interaction.guild and channel_id else None
+    if isinstance(channel, discord.TextChannel):
+        await channel.send(f"💸 **Solicitação de saque**\nUsuário: {interaction.user.mention}\nValor: **{money(valor)}**\nStatus: Pendente")
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CheckFailure):
+        message = "🔒 Este comando é restrito à equipe do servidor." if not is_premium(interaction) else "🔒 Você não tem permissão para usar este comando."
+    else:
+        log.exception("Erro em comando slash", exc_info=error)
+        message = "Ocorreu um erro ao executar o comando. Confira os registros da hospedagem."
     try:
         if interaction.response.is_done():
             await interaction.followup.send(message, ephemeral=True)
@@ -1156,788 +730,51 @@ async def command_error(interaction: discord.Interaction, error: app_commands.Ap
         pass
 
 
-
-# ═══════════════════════════════════════════════════════════════
-# NOVO PAINEL INTERATIVO DE TICKETS — ZORDX STORE (tema azul)
-# Configurações de painéis são guardadas em SQLite para persistirem.
-# ═══════════════════════════════════════════════════════════════
-
-def ticket_panels_load(guild_id: int):
-    raw = config_value(f"ticket_panels_{guild_id}", "[]")
-    try:
-        data = json.loads(raw)
-        return data if isinstance(data, list) else []
-    except (TypeError, json.JSONDecodeError):
-        return []
+_commands_synced = False
 
 
-def ticket_panels_save(guild_id: int, panels):
-    save_config(f"ticket_panels_{guild_id}", json.dumps(panels, ensure_ascii=False))
-
-
-def panel_embed(data):
-    raw = str(data.get("color", "2563eb")).lstrip("#")
-    try:
-        color = discord.Color(int(raw, 16))
-    except ValueError:
-        color = discord.Color.blue()
-    result = discord.Embed(
-        title=(data.get("title") or "🎫 Sistema de Tickets")[:256],
-        description=(data.get("description") or "Selecione abaixo como podemos ajudar.")[:4000],
-        color=color,
-        url=(data.get("title_url") or None)
-    )
-    if data.get("author"):
-        result.set_author(name=data["author"][:256], icon_url=data.get("author_icon") or None,
-                          url=data.get("author_url") or None)
-    if data.get("thumbnail"):
-        result.set_thumbnail(url=data["thumbnail"])
-    if data.get("image"):
-        result.set_image(url=data["image"])
-    if data.get("footer") or data.get("footer_icon"):
-        result.set_footer(text=(data.get("footer") or "ZORDX STORE")[:2048],
-                          icon_url=data.get("footer_icon") or None)
-    if data.get("timestamp"):
-        result.timestamp = datetime.now(timezone.utc)
-    for field in data.get("fields", [])[:25]:
-        if field.get("name") and field.get("value"):
-            result.add_field(name=field["name"][:256], value=field["value"][:1024], inline=bool(field.get("inline", False)))
-    return result
-
-
-class TicketPanelEditModal(discord.ui.Modal, title="Editor do Painel em Embed"):
-    titulo = discord.ui.TextInput(label="Título", max_length=256, required=True)
-    descricao = discord.ui.TextInput(label="Descrição", style=discord.TextStyle.paragraph, max_length=3500, required=True)
-    cor = discord.ui.TextInput(label="Cor hexadecimal", default="#2563EB", max_length=7, required=True)
-    rodape = discord.ui.TextInput(label="Texto do rodapé (opcional)", max_length=200, required=False)
-
-    def __init__(self, guild_id, panel_index=None):
-        super().__init__()
-        self.guild_id = guild_id
-        self.panel_index = panel_index
-        panels = ticket_panels_load(guild_id)
-        data = panels[panel_index] if panel_index is not None and panel_index < len(panels) else {}
-        self.titulo.default = data.get("title", "🎫 Sistema de Tickets")
-        self.descricao.default = data.get("description", "Selecione abaixo como podemos ajudar.")
-        self.cor.default = "#" + data.get("color", "2563eb").lstrip("#")
-        self.rodape.default = data.get("footer", "ZORDX STORE • Atendimento")
-
-    async def on_submit(self, interaction: discord.Interaction):
-        color = str(self.cor.value).strip().lstrip("#")
+@bot.event
+async def on_ready():
+    global _commands_synced
+    log.info("Bot conectado como %s (%s)", bot.user, bot.user.id if bot.user else "?")
+    if not _commands_synced:
         try:
-            if len(color) != 6:
-                raise ValueError
-            int(color, 16)
-        except ValueError:
-            return await interaction.response.send_message("Cor inválida. Use um código como #2563EB.", ephemeral=True)
-        panels = ticket_panels_load(self.guild_id)
-        data = {"title": str(self.titulo.value), "description": str(self.descricao.value),
-                "color": color.lower(), "footer": str(self.rodape.value), "mode": "button",
-                "options": [{"label": "Atendimento", "emoji": "🎫"}]}
-        if self.panel_index is None:
-            if len(panels) >= 5:
-                return await interaction.response.send_message("Você já atingiu o limite de 5 painéis.", ephemeral=True)
-            panels.append(data)
-            self.panel_index = len(panels) - 1
-        else:
-            old = panels[self.panel_index]
-            data.update({k: v for k, v in old.items() if k not in data})
-            panels[self.panel_index] = data
-        ticket_panels_save(self.guild_id, panels)
-        view = TicketPanelEditorView(self.guild_id, self.panel_index)
-        await interaction.response.send_message(
-            "💙 **Painel salvo!** Use os botões para escolher como os membros abrirão o ticket, ver a prévia ou publicar.",
-            embed=panel_embed(panels[self.panel_index]), view=view, ephemeral=True)
+            if GUILD_ID:
+                guild = discord.Object(id=GUILD_ID)
+                bot.tree.copy_global_to(guild=guild)
+                await bot.tree.sync(guild=guild)
+                log.info("Comandos sincronizados no servidor %s", GUILD_ID)
+            else:
+                await bot.tree.sync()
+                log.info("Comandos globais sincronizados")
+            _commands_synced = True
+        except Exception:
+            log.exception("Falha ao sincronizar comandos")
 
 
-class TicketOpenButton(discord.ui.Button):
-    def __init__(self, label, emoji="🎫"):
-        super().__init__(label=label[:80], emoji=emoji if emoji else None,
-                         style=discord.ButtonStyle.primary, custom_id=f"zordx:open:{label[:40]}")
-        self.ticket_label = label
-
-    async def callback(self, interaction: discord.Interaction):
-        await create_ticket(interaction, self.ticket_label)
-
-
-class TicketOpenSelect(discord.ui.Select):
-    def __init__(self, options):
-        choices = [discord.SelectOption(label=x.get("label", "Atendimento")[:100],
-                    emoji=x.get("emoji") if x.get("emoji") else None,
-                    description=x.get("description", "Abrir um ticket")[:100]) for x in options[:25]]
-        super().__init__(placeholder="Selecione o tipo de atendimento...", min_values=1, max_values=1, options=choices)
-
-    async def callback(self, interaction: discord.Interaction):
-        await create_ticket(interaction, self.values[0])
-
-
-class PublishedTicketPanelView(discord.ui.View):
-    def __init__(self, data):
-        super().__init__(timeout=None)
-        options = data.get("options") or [{"label": "Atendimento", "emoji": "🎫"}]
-        if data.get("mode") == "select":
-            self.add_item(TicketOpenSelect(options))
-        else:
-            for opt in options[:25]:
-                self.add_item(TicketOpenButton(opt.get("label", "Atendimento"), opt.get("emoji", "🎫")))
-
-
-class TicketPanelOptionsModal(discord.ui.Modal, title="Gerenciar opções do painel"):
-    options_text = discord.ui.TextInput(label="Uma opção por linha: nome | emoji | descrição", style=discord.TextStyle.paragraph, max_length=4000, required=True)
-    def __init__(self, guild_id, panel_index):
-        super().__init__(); self.guild_id, self.panel_index = guild_id, panel_index
-        panels = ticket_panels_load(guild_id)
-        data = panels[panel_index] if panel_index < len(panels) else {}
-        current = data.get("options") or [{"label": "Atendimento", "emoji": "🎫", "description": "Abrir um ticket"}]
-        self.options_text.default = "\n".join(f"{x.get('label','Atendimento')} | {x.get('emoji','🎫')} | {x.get('description','Abrir um ticket')}" for x in current)[:4000]
-    async def on_submit(self, interaction):
-        parsed = []
-        for line in str(self.options_text.value).splitlines():
-            line = line.strip()
-            if not line: continue
-            parts = [x.strip() for x in line.split("|", 2)]
-            label = parts[0][:80]
-            emoji = (parts[1] if len(parts) > 1 else "🎫")[:50]
-            description = (parts[2] if len(parts) > 2 else f"Abrir ticket: {label}")[:100]
-            if not label: continue
-            parsed.append({"label": label, "emoji": emoji, "description": description})
-        if not parsed: return await interaction.response.send_message("Informe pelo menos uma opção.", ephemeral=True)
-        if len(parsed) > 25: return await interaction.response.send_message("O Discord permite no máximo 25 opções por painel.", ephemeral=True)
-        panels = ticket_panels_load(self.guild_id)
-        if self.panel_index >= len(panels): return await interaction.response.send_message("Painel não encontrado.", ephemeral=True)
-        panels[self.panel_index]["options"] = parsed
-        ticket_panels_save(self.guild_id, panels)
-        await interaction.response.send_message("✅ Opções salvas. Cada linha foi interpretada como nome | emoji | descrição.", embed=panel_embed(panels[self.panel_index]), view=TicketPanelEditorView(self.guild_id, self.panel_index), ephemeral=True)
-
-
-class TicketPanelEditorView(discord.ui.View):
-    def __init__(self, guild_id, panel_index):
-        super().__init__(timeout=600)
-        self.guild_id, self.panel_index = guild_id, panel_index
-
-    def current(self):
-        panels = ticket_panels_load(self.guild_id)
-        return panels[self.panel_index] if self.panel_index < len(panels) else None
-
-    @discord.ui.button(label="Editar Embed", emoji="📝", style=discord.ButtonStyle.primary, row=0)
-    async def edit_embed(self, interaction, button):
-        await interaction.response.send_modal(TicketPanelEditModal(self.guild_id, self.panel_index))
-
-    @discord.ui.button(label="Botão", emoji="🔘", style=discord.ButtonStyle.primary, row=0)
-    async def mode_button(self, interaction, button):
-        data = self.current()
-        if not data: return await interaction.response.send_message("Painel não encontrado.", ephemeral=True)
-        data["mode"] = "button"
-        ticket_panels_save(self.guild_id, ticket_panels_load(self.guild_id))
-        panels = ticket_panels_load(self.guild_id); panels[self.panel_index] = data; ticket_panels_save(self.guild_id, panels)
-        await interaction.response.edit_message(content="Modo definido: **Botões**.", embed=panel_embed(data), view=self)
-
-    @discord.ui.button(label="Menu de seleção", emoji="📋", style=discord.ButtonStyle.primary, row=0)
-    async def mode_select(self, interaction, button):
-        panels = ticket_panels_load(self.guild_id); data = panels[self.panel_index]
-        data["mode"] = "select"; ticket_panels_save(self.guild_id, panels)
-        await interaction.response.edit_message(content="Modo definido: **Menu de seleção**. Para publicar, use Enviar Painel.", embed=panel_embed(data), view=self)
-
-    @discord.ui.button(label="Gerenciar opções", emoji="🧩", style=discord.ButtonStyle.primary, row=1)
-    async def manage_options(self, interaction, button):
-        await interaction.response.send_modal(TicketPanelOptionsModal(self.guild_id, self.panel_index))
-
-    @discord.ui.button(label="Ver prévia", emoji="👁️", style=discord.ButtonStyle.secondary, row=2)
-    async def preview(self, interaction, button):
-        data = self.current()
-        await interaction.response.send_message(embed=panel_embed(data), view=PublishedTicketPanelView(data), ephemeral=True)
-
-    @discord.ui.button(label="Enviar Painel", emoji="📤", style=discord.ButtonStyle.success, row=2)
-    async def send_panel(self, interaction, button):
-        await interaction.response.send_message("Escolha o canal onde deseja publicar este painel:",
-            view=PublishChannelView(self.guild_id, self.panel_index), ephemeral=True)
-
-    @discord.ui.button(label="Voltar", emoji="⬅️", style=discord.ButtonStyle.secondary, row=2)
-    async def back(self, interaction, button):
-        await interaction.response.edit_message(content="**Gerenciar painéis** — selecione uma opção.",
-            embed=None, view=TicketPanelsView(self.guild_id))
-
-
-class PublishPanelSelectView(discord.ui.View):
-    def __init__(self, guild_id):
-        super().__init__(timeout=180)
-        panels = ticket_panels_load(guild_id)
-        self.add_item(PublishPanelSelect(guild_id, panels))
-        self.guild_id = guild_id
-
-
-class PublishPanelSelect(discord.ui.Select):
-    def __init__(self, guild_id, panels):
-        self.guild_id = guild_id
-        super().__init__(placeholder="Selecione um painel...", min_values=1, max_values=1,
-            options=[discord.SelectOption(label=(p.get("title") or f"Painel {i+1}")[:100], value=str(i)) for i,p in enumerate(panels[:25])])
-
-    async def callback(self, interaction):
-        await interaction.response.send_message("Agora escolha o canal para publicar:",
-            view=PublishChannelView(self.guild_id, int(self.values[0])), ephemeral=True)
-
-
-class PublishChannelView(discord.ui.View):
-    def __init__(self, guild_id, panel_index):
-        super().__init__(timeout=180)
-        self.guild_id, self.panel_index = guild_id, panel_index
-        self.add_item(PublishChannelSelect(guild_id, panel_index))
-
-
-class PublishChannelSelect(discord.ui.ChannelSelect):
-    def __init__(self, guild_id, panel_index):
-        super().__init__(placeholder="Selecione o canal de publicação...", channel_types=[discord.ChannelType.text], min_values=1, max_values=1)
-        self.guild_id, self.panel_index = guild_id, panel_index
-
-    async def callback(self, interaction: discord.Interaction):
-        target = self.values[0]
-        panels = ticket_panels_load(self.guild_id)
-        if self.panel_index >= len(panels):
-            return await interaction.response.send_message("Painel não encontrado.", ephemeral=True)
+async def main():
+    if not TOKEN:
+        raise RuntimeError("A variável DISCORD_TOKEN não está configurada na hospedagem.")
+    init_db()
+    # Re-register persistent views so ticket and panel buttons keep working after restarts.
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketCloseView())
+    with db() as c:
+        saved_panels = c.execute("SELECT message_id,buttons_json FROM zordx_panels").fetchall()
+    for message_id, buttons_json in saved_panels:
         try:
-            await target.send(embed=panel_embed(panels[self.panel_index]), view=PublishedTicketPanelView(panels[self.panel_index]))
-        except discord.Forbidden:
-            return await interaction.response.send_message("Não tenho permissão para enviar mensagens e embeds nesse canal.", ephemeral=True)
-        await interaction.response.send_message(f"✅ Painel publicado em {target.mention}.", ephemeral=True)
-
-
-class TicketPanelsView(discord.ui.View):
-    def __init__(self, guild_id):
-        super().__init__(timeout=600)
-        self.guild_id = guild_id
-        panels = ticket_panels_load(guild_id)
-        if panels:
-            self.add_item(TicketPanelSelect(guild_id))
-
-    @discord.ui.button(label="Criar novo (Manual)", emoji="➕", style=discord.ButtonStyle.primary, row=1)
-    async def create_manual(self, interaction, button):
-        panels = ticket_panels_load(self.guild_id)
-        if len(panels) >= 5:
-            return await interaction.response.send_message("Limite atingido: você pode ter até 5 painéis.", ephemeral=True)
-        await interaction.response.send_modal(TicketPanelEditModal(self.guild_id))
-
-    @discord.ui.button(label="Criar Painel com IA", emoji="✨", style=discord.ButtonStyle.primary, row=1)
-    async def create_ai(self, interaction, button):
-        panels = ticket_panels_load(self.guild_id)
-        if len(panels) >= 5:
-            return await interaction.response.send_message("Limite atingido: você pode ter até 5 painéis.", ephemeral=True)
-        # Geração automática local de um modelo completo, sem depender de chave externa.
-        data = {"title": "🎫 Central de Atendimento", "description": "Olá! Selecione abaixo o tipo de atendimento para falar com nossa equipe.\n\n💙 Responderemos assim que possível. Não envie senhas ou códigos de autenticação.", "color": "2563eb", "footer": f"{SHOP_NAME} • Atendimento", "mode": "button", "options": [{"label": label, "emoji": emoji, "description": f"Abrir ticket: {label}"} for label, emoji in TICKET_TYPES[:5]]}
-        panels.append(data)
-        ticket_panels_save(self.guild_id, panels)
-        idx = len(panels) - 1
-        await interaction.response.edit_message(content="✨ **Modelo automático criado e salvo!** Edite o embed e as opções antes de publicar.", embed=panel_embed(data), view=TicketPanelEditorView(self.guild_id, idx))
-
-    @discord.ui.button(label="Excluir Painel", emoji="🗑️", style=discord.ButtonStyle.danger, row=2)
-    async def delete_panel(self, interaction, button):
-        panels = ticket_panels_load(self.guild_id)
-        if not panels:
-            return await interaction.response.send_message("Não há painéis para excluir.", ephemeral=True)
-        await interaction.response.send_message("Escolha qual painel excluir. A exclusão é permanente.", view=DeletePanelView(self.guild_id), ephemeral=True)
-
-    @discord.ui.button(label="Voltar", emoji="⬅️", style=discord.ButtonStyle.secondary, row=2)
-    async def back(self, interaction, button):
-        await interaction.response.edit_message(embed=ticket_home_embed(), view=TicketHomeView(self.guild_id))
-
-
-class TicketPanelSelect(discord.ui.Select):
-    def __init__(self, guild_id):
-        self.guild_id = guild_id
-        panels = ticket_panels_load(guild_id)
-        super().__init__(placeholder="Selecione um Painel para editar...", min_values=1, max_values=1,
-            options=[discord.SelectOption(label=(p.get("title") or f"Painel {i+1}")[:100], value=str(i), description=f"Painel {i+1} de {len(panels)}") for i,p in enumerate(panels[:25])])
-
-    async def callback(self, interaction):
-        idx = int(self.values[0]); data = ticket_panels_load(self.guild_id)[idx]
-        await interaction.response.edit_message(content=f"**Editor do Painel:** {data.get('title', 'Painel')} ", embed=panel_embed(data), view=TicketPanelEditorView(self.guild_id, idx))
-
-
-class DeletePanelSelect(discord.ui.Select):
-    def __init__(self, guild_id):
-        self.guild_id = guild_id
-        panels = ticket_panels_load(guild_id)
-        super().__init__(placeholder="Selecione o painel para excluir...", min_values=1, max_values=1,
-            options=[discord.SelectOption(label=(p.get("title") or f"Painel {i+1}")[:100], value=str(i)) for i,p in enumerate(panels[:25])])
-
-    async def callback(self, interaction):
-        await interaction.response.send_message("Tem certeza de que deseja excluir este painel?", view=ConfirmDeletePanelView(self.guild_id, int(self.values[0])), ephemeral=True)
-
-
-class DeletePanelView(discord.ui.View):
-    def __init__(self, guild_id):
-        super().__init__(timeout=180); self.add_item(DeletePanelSelect(guild_id))
-
-
-class ConfirmDeletePanelView(discord.ui.View):
-    def __init__(self, guild_id, index):
-        super().__init__(timeout=90); self.guild_id, self.index = guild_id, index
-
-    @discord.ui.button(label="Confirmar exclusão", emoji="🗑️", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction, button):
-        panels = ticket_panels_load(self.guild_id)
-        if self.index < len(panels):
-            panels.pop(self.index); ticket_panels_save(self.guild_id, panels)
-        for child in self.children: child.disabled = True
-        await interaction.response.edit_message(content="Painel excluído.", view=self)
-
-    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction, button):
-        await interaction.response.edit_message(content="Exclusão cancelada.", view=None)
-
-
-def ticket_home_embed():
-    return embed("🎫 Sistema de Tickets",
-        "Bem-vindo ao painel de configuração do sistema de tickets!\n"
-        "Aqui você pode criar painéis personalizados, configurar cargos de suporte, canais de logs e muito mais — tudo de forma rápida e organizada.\n\n"
-        "**Como começar**\n1. **Painéis de Ticket:** crie a mensagem que os membros verão.\n"
-        "2. **Configurações Gerais:** defina cargos, categoria e opções de atendimento.\n"
-        "3. **Enviar Painel:** publique o painel pronto em um canal.\n\n**O que deseja configurar?**", color=discord.Color.blue())
-
-
-class TicketHomeView(discord.ui.View):
-    def __init__(self, guild_id): super().__init__(timeout=600); self.guild_id = guild_id
-
-    @discord.ui.button(label="Painéis de Ticket", emoji="🧩", style=discord.ButtonStyle.primary, row=0)
-    async def panels(self, interaction, button):
-        panels = ticket_panels_load(self.guild_id)
-        await interaction.response.edit_message(content=f"**Gerenciar painéis** — Painéis {len(panels)}/5. Criar um painel não o publica automaticamente.", embed=None, view=TicketPanelsView(self.guild_id))
-
-    @discord.ui.button(label="Configurações Gerais", emoji="⚙️", style=discord.ButtonStyle.primary, row=0)
-    async def settings(self, interaction, button):
-        await interaction.response.edit_message(embed=embed("⚙️ Configurações Gerais",
-            "Ajustes que controlam o funcionamento do sistema de tickets.\n\n"
-            "🎫 **Atendimento** — cargos, categorias, logs, nome e tipo do canal, imagem, avaliação e limite.\n"
-            "🕒 **Atendimento por Horário** — dias e horários de abertura.\n"
-            "🤖 **Inteligência Artificial** — respostas automáticas dentro dos tickets.\n\n"
-            "Começando agora? Configure primeiro Cargos de Suporte e Categoria dos Tickets.", color=discord.Color.blue()), view=TicketGeneralSettingsView(self.guild_id))
-
-    @discord.ui.button(label="Enviar Painel", emoji="📤", style=discord.ButtonStyle.success, row=1)
-    async def publish(self, interaction, button):
-        panels = ticket_panels_load(self.guild_id)
-        if not panels: return await interaction.response.send_message("Crie um painel primeiro.", ephemeral=True)
-        await interaction.response.edit_message(content="📤 **Enviar Painel**\nSelecione o painel que deseja publicar.", embed=None, view=PublishPanelSelectView(self.guild_id))
-
-
-class TicketScheduleModal(discord.ui.Modal, title="Atendimento por Horário"):
-    dias = discord.ui.TextInput(label="Dias (0=seg ... 6=dom; ex.: 0,1,2,3,4)", default="0,1,2,3,4,5,6", max_length=30)
-    inicio = discord.ui.TextInput(label="Horário inicial (24h, HH:MM)", default="09:00", max_length=5)
-    fim = discord.ui.TextInput(label="Horário final (24h, HH:MM)", default="21:00", max_length=5)
-    fuso = discord.ui.TextInput(label="Fuso UTC (ex.: -3 para Brasília)", default="-3", max_length=4)
-    habilitado = discord.ui.TextInput(label="Ativar agenda? (sim/não)", default="não", max_length=5)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            days = sorted(set(int(x.strip()) for x in str(self.dias.value).split(",") if x.strip() != ""))
-            if not days or any(x < 0 or x > 6 for x in days): raise ValueError
-            start = datetime.strptime(str(self.inicio.value).strip(), "%H:%M").strftime("%H:%M")
-            end = datetime.strptime(str(self.fim.value).strip(), "%H:%M").strftime("%H:%M")
-            offset = float(str(self.fuso.value).strip())
-            if not -12 <= offset <= 14: raise ValueError
-        except ValueError:
-            return await interaction.response.send_message("Dados inválidos. Use dias de 0 a 6, horários HH:MM e fuso UTC entre -12 e +14.", ephemeral=True)
-        enabled = str(self.habilitado.value).strip().lower() in ("sim", "s", "yes", "y", "true", "1")
-        save_config(f"ticket_schedule_{interaction.guild_id}", json.dumps({"enabled": enabled, "days": days, "start": start, "end": end, "utc_offset": offset}))
-        status = "ativada" if enabled else "desativada"
-        await interaction.response.send_message(f"✅ Agenda {status}. Dias: {', '.join(str(x) for x in days)}; horário: {start}–{end}; UTC{offset:+g}.", ephemeral=True)
-
-
-def ticket_schedule_allows(guild_id: int):
-    raw = config_value(f"ticket_schedule_{guild_id}", "")
-    if not raw:
-        return True, ""
-    try:
-        cfg = json.loads(raw)
-        if not cfg.get("enabled", False): return True, ""
-        local_now = datetime.now(timezone.utc) + timedelta(hours=float(cfg.get("utc_offset", -3)))
-        days = cfg.get("days", list(range(7)))
-        start = datetime.strptime(cfg.get("start", "09:00"), "%H:%M").time()
-        end = datetime.strptime(cfg.get("end", "21:00"), "%H:%M").time()
-        inside_time = start <= local_now.time() <= end if start <= end else (local_now.time() >= start or local_now.time() <= end)
-        if local_now.weekday() not in days or not inside_time:
-            return False, f"O atendimento está fechado agora. Horário: {start.strftime('%H:%M')}–{end.strftime('%H:%M')} (UTC{float(cfg.get('utc_offset', -3)):+g})."
-        return True, ""
-    except (ValueError, TypeError, json.JSONDecodeError):
-        logging.exception("Configuração de horário de tickets inválida")
-        return True, ""
-
-
-class TicketGeneralSettingsView(discord.ui.View):
-    def __init__(self, guild_id): super().__init__(timeout=600); self.guild_id = guild_id
-
-    @discord.ui.button(label="Atendimento", emoji="🎫", style=discord.ButtonStyle.primary, row=0)
-    async def service(self, interaction, button):
-        e = embed("🎫 | Atendimento", "Defina como os tickets são abertos e atendidos. Cada configuração pode valer para o servidor inteiro (Global) ou apenas para um painel (Por Ticket).\n\n**Editando:** 🌐 Global — todos os painéis\n\n**Equipe**\nCargos de Suporte — quem atende, é mencionado e tem acesso aos tickets\n\n**Canais**\nCategoria dos Tickets\nCanal de Logs\nCanal de Avaliação\n\n**Ticket**\nNome do Canal: `🆘️•ticket•aberto•🆘️`\nTipo de Canal: Canal individual\nImagem ao Abrir\nLimite por Usuário: `5 por usuário`\n\nPrimeiros passos: configure Cargos de Suporte e Categoria dos Tickets.", color=discord.Color.blue())
-        await interaction.response.edit_message(embed=e, view=TicketServiceSettingsView(self.guild_id))
-
-    @discord.ui.button(label="Atendimento por Horário", emoji="🕒", style=discord.ButtonStyle.primary, row=0)
-    async def hours(self, interaction, button):
-        await interaction.response.send_modal(TicketScheduleModal())
-
-    @discord.ui.button(label="Inteligência Artificial", emoji="🤖", style=discord.ButtonStyle.primary, row=1)
-    async def ai(self, interaction, button):
-        await interaction.response.send_message("A tela está prevista, mas respostas de IA exigem conectar um provedor de IA. Nenhuma IA externa está conectada agora.", ephemeral=True)
-
-    @discord.ui.button(label="Voltar", emoji="⬅️", style=discord.ButtonStyle.secondary, row=1)
-    async def back(self, interaction, button): await interaction.response.edit_message(embed=ticket_home_embed(), view=TicketHomeView(self.guild_id))
-
-
-class TicketBehaviorModal(discord.ui.Modal, title="Nome do canal e imagem de abertura"):
-    nome = discord.ui.TextInput(label="Modelo do nome (use {user} e {type})", default="ticket-{user}", max_length=90, required=True)
-    imagem = discord.ui.TextInput(label="URL da imagem ao abrir (opcional)", max_length=400, required=False)
-    async def on_submit(self, interaction):
-        template = str(self.nome.value).strip()
-        if not template or not any(token in template for token in ("{user}", "{type}")):
-            return await interaction.response.send_message("O nome precisa conter {user} ou {type} para diferenciar os tickets.", ephemeral=True)
-        image_url = str(self.imagem.value).strip()
-        if image_url and not image_url.lower().startswith(("https://", "http://")):
-            return await interaction.response.send_message("A URL da imagem precisa começar com https:// ou http://.", ephemeral=True)
-        save_config(f"ticket_channel_name_template_{interaction.guild_id}", template)
-        save_config(f"ticket_open_image_{interaction.guild_id}", image_url)
-        await interaction.response.send_message("✅ Modelo do canal e imagem de abertura salvos.", ephemeral=True)
-
-
-class TicketServiceSettingsView(discord.ui.View):
-    def __init__(self, guild_id): super().__init__(timeout=600); self.guild_id = guild_id
-    @discord.ui.button(label="Cargos de Suporte", emoji="👥", style=discord.ButtonStyle.primary, row=0)
-    async def roles(self, interaction, button):
-        view = discord.ui.View(timeout=180); view.add_item(ConfigRoleSelect())
-        await interaction.response.send_message("Selecione o cargo de suporte. Para vários cargos, repita a configuração.", view=view, ephemeral=True)
-    @discord.ui.button(label="Categoria dos Tickets", emoji="📁", style=discord.ButtonStyle.primary, row=0)
-    async def category(self, interaction, button):
-        view = discord.ui.View(timeout=180); view.add_item(ConfigChannelSelect("ticket_category_id", "Selecionar categoria", [discord.ChannelType.category]))
-        await interaction.response.send_message("Selecione a categoria onde os canais serão criados:", view=view, ephemeral=True)
-    @discord.ui.button(label="Canal de Logs", emoji="📋", style=discord.ButtonStyle.primary, row=1)
-    async def logs(self, interaction, button):
-        view = discord.ui.View(timeout=180); view.add_item(ConfigChannelSelect("ticket_logs_channel_id", "Selecionar canal de logs", [discord.ChannelType.text]))
-        await interaction.response.send_message("Selecione o canal de logs:", view=view, ephemeral=True)
-    @discord.ui.button(label="Canal de Avaliação", emoji="⭐", style=discord.ButtonStyle.primary, row=1)
-    async def reviews(self, interaction, button):
-        view = discord.ui.View(timeout=180); view.add_item(ConfigChannelSelect("ticket_reviews_channel_id", "Selecionar canal de avaliação", [discord.ChannelType.text]))
-        await interaction.response.send_message("Selecione o canal de avaliações:", view=view, ephemeral=True)
-    @discord.ui.button(label="Nome e imagem de abertura", emoji="🖼️", style=discord.ButtonStyle.primary, row=2)
-    async def behavior(self, interaction, button):
-        await interaction.response.send_modal(TicketBehaviorModal())
-    @discord.ui.button(label="Limite por Usuário", emoji="🔢", style=discord.ButtonStyle.primary, row=3)
-    async def limit(self, interaction, button):
-        await interaction.response.send_modal(TicketLimitModal())
-    @discord.ui.button(label="Voltar", emoji="⬅️", style=discord.ButtonStyle.secondary, row=3)
-    async def back(self, interaction, button): await interaction.response.edit_message(embed=embed("⚙️ Configurações Gerais", "Escolha uma seção para configurar.", color=discord.Color.blue()), view=TicketGeneralSettingsView(self.guild_id))
-
-
-class TicketLimitModal(discord.ui.Modal, title="Limite de Tickets por Usuário"):
-    limite = discord.ui.TextInput(label="Quantidade máxima de tickets abertos", default="5", max_length=2)
-    async def on_submit(self, interaction):
-        try: value = int(str(self.limite.value)); assert 1 <= value <= 20
-        except (ValueError, AssertionError): return await interaction.response.send_message("Informe um número de 1 a 20.", ephemeral=True)
-        save_config(f"ticket_limit_{interaction.guild_id}", value)
-        await interaction.response.send_message(f"✅ Limite salvo: **{value} ticket(s) aberto(s) por usuário**. A regra já está ativa para as próximas tentativas de abertura.", ephemeral=True)
-
-
-@bot.tree.command(name="config_ticket", description="Abre o painel interativo de configuração de tickets.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-async def config_ticket(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=ticket_home_embed(), view=TicketHomeView(interaction.guild_id), ephemeral=True)
-
-
-@bot.tree.command(name="ajuda-vendas", description="Explica os comandos de vendas da ZORDX STORE.")
-@app_commands.guild_only()
-async def ajuda_vendas(interaction: discord.Interaction):
-    text = ("💙 **Ajuda de Vendas — ZORDX STORE**\n\n"
-            "`/config_ticket` — configurar o sistema de tickets.\n"
-            "`/cupom criar` — criar cupom (equipe).\n`/cupom listar` — listar cupons.\n"
-            "`/anunciar` — publicar um anúncio personalizado (equipe).\n\n"
-            "Nunca envie senhas ou códigos de autenticação. Confirme preço e condições antes de comprar.")
-    await interaction.response.send_message(embed=embed("📘 Ajuda de Vendas", text, color=discord.Color.blue()), ephemeral=True)
-
-
-@bot.tree.command(name="anunciar", description="Publica um anúncio em um canal escolhido.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-@app_commands.describe(titulo="Título do anúncio", mensagem="Texto do anúncio", canal="Canal de destino (opcional)")
-async def anunciar(interaction: discord.Interaction, titulo: str, mensagem: str, canal: discord.TextChannel = None):
-    target = canal or interaction.channel
-    card = embed("📢 " + titulo[:240], mensagem[:3500], color=discord.Color.blue())
-    card.set_footer(text=f"{SHOP_NAME} • Anúncio")
-    try:
-        await target.send(embed=card)
-    except discord.Forbidden:
-        return await interaction.response.send_message("Não tenho permissão para publicar nesse canal.", ephemeral=True)
-    await interaction.response.send_message(f"✅ Anúncio publicado em {target.mention}.", ephemeral=True)
-
-
-
-# ═══════════════════════════════════════════════════════════════
-# SISTEMA DE LOJA ADICIONAL — SALDO, PRODUTOS, COMPRAS E PEDIDOS
-# Os saldos e pedidos ficam no SQLite e sobrevivem a reinicializações.
-# ═══════════════════════════════════════════════════════════════
-
-@bot.tree.command(name="adicionar_produto", description="Cadastra um produto na loja.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-@app_commands.describe(nome="Nome do produto", preco="Preço em reais", descricao="Descrição",
-                       estoque="Unidades disponíveis", link="Link opcional do produto")
-async def adicionar_produto(
-    interaction: discord.Interaction,
-    nome: str,
-    preco: app_commands.Range[float, 0.01, 100000000.0],
-    descricao: str = "Sem descrição",
-    estoque: app_commands.Range[int, 0, 1000000] = 0,
-    link: str = ""
-):
-    nome_limpo = nome.strip()
-    if not nome_limpo or len(nome_limpo) > 100:
-        return await interaction.response.send_message("Informe um nome de produto com até 100 caracteres.", ephemeral=True)
-    link_limpo = link.strip()
-    if link_limpo and not (link_limpo.startswith("https://") or link_limpo.startswith("http://")):
-        return await interaction.response.send_message("O link precisa começar com http:// ou https://.", ephemeral=True)
-    try:
-        with sqlite3.connect(DB_PATH) as c:
-            c.execute(
-                "INSERT INTO shop_products(name,description,price,stock,link) VALUES(?,?,?,?,?) "
-                "ON CONFLICT(name) DO UPDATE SET description=excluded.description, price=excluded.price, "
-                "stock=excluded.stock, link=excluded.link",
-                (nome_limpo, descricao[:1000] or "Sem descrição", float(preco), int(estoque), link_limpo)
-            )
-    except sqlite3.Error:
-        logging.exception("Falha ao cadastrar produto")
-        return await interaction.response.send_message("Não consegui salvar o produto no banco de dados.", ephemeral=True)
-    await interaction.response.send_message(
-        f"✅ Produto **{discord.utils.escape_markdown(nome_limpo)}** cadastrado.\n"
-        f"Preço: **{money(preco)}** • Estoque: **{estoque}** unidade(s).", ephemeral=True
-    )
-
-
-@bot.tree.command(name="loja", description="Mostra os produtos cadastrados na loja.")
-@app_commands.guild_only()
-async def loja(interaction: discord.Interaction):
-    with sqlite3.connect(DB_PATH) as c:
-        rows = c.execute(
-            "SELECT name,description,price,stock,link FROM shop_products ORDER BY name LIMIT 25"
-        ).fetchall()
-    if not rows:
-        return await interaction.response.send_message("🏪 A loja ainda não tem produtos cadastrados.", ephemeral=True)
-    card = embed(f"🛍️ {SHOP_NAME} — Produtos", "Confira os produtos disponíveis abaixo.")
-    for name, description, price, stock, link in rows:
-        stock_text = "Esgotado" if int(stock or 0) <= 0 else f"{stock} unidade(s)"
-        value = f"**Preço:** {money(price)}\n**Estoque:** {stock_text}\n{(description or 'Sem descrição')[:700]}"
-        if link:
-            value += f"\n[Ver produto]({link})"
-        card.add_field(name=str(name)[:256], value=value[:1024], inline=False)
-    card.set_footer(text="Para comprar, use /comprar e informe o nome exato do produto.")
-    await interaction.response.send_message(embed=card, ephemeral=True)
-
-
-@bot.tree.command(name="saldo", description="Consulta seu saldo da loja.")
-@app_commands.guild_only()
-async def saldo(interaction: discord.Interaction):
-    with sqlite3.connect(DB_PATH) as c:
-        row = c.execute(
-            "SELECT balance FROM shop_balances WHERE guild_id=? AND user_id=?",
-            (interaction.guild_id, interaction.user.id)
-        ).fetchone()
-    balance = float(row[0]) if row else 0.0
-    await interaction.response.send_message(f"💰 Seu saldo na **{SHOP_NAME}** é **{money(balance)}**.", ephemeral=True)
-
-
-@bot.tree.command(name="adicionar_saldo", description="Adiciona saldo à carteira de um membro.")
-@app_commands.guild_only()
-@app_commands.checks.has_permissions(administrator=True)
-@app_commands.describe(membro="Membro que receberá o saldo", valor="Valor em reais")
-async def adicionar_saldo(interaction: discord.Interaction, membro: discord.Member,
-                          valor: app_commands.Range[float, 0.01, 100000000.0]):
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute(
-            "INSERT INTO shop_balances(guild_id,user_id,balance) VALUES(?,?,?) "
-            "ON CONFLICT(guild_id,user_id) DO UPDATE SET balance=balance+excluded.balance",
-            (interaction.guild_id, membro.id, float(valor))
-        )
-        balance = c.execute(
-            "SELECT balance FROM shop_balances WHERE guild_id=? AND user_id=?",
-            (interaction.guild_id, membro.id)
-        ).fetchone()[0]
-    await interaction.response.send_message(
-        f"✅ Adicionado **{money(valor)}** ao saldo de {membro.mention}. Novo saldo: **{money(balance)}**.",
-        ephemeral=True
-    )
-
-
-@bot.tree.command(name="comprar", description="Compra um produto usando o saldo da loja.")
-@app_commands.guild_only()
-@app_commands.describe(nome="Nome exato do produto cadastrado")
-async def comprar(interaction: discord.Interaction, nome: str):
-    nome_limpo = nome.strip()
-    if not nome_limpo or len(nome_limpo) > 100:
-        return await interaction.response.send_message("Informe um nome de produto com até 100 caracteres.", ephemeral=True)
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute("BEGIN IMMEDIATE")
-        product = c.execute(
-            "SELECT name,price,stock FROM shop_products WHERE name=? COLLATE NOCASE", (nome_limpo,)
-        ).fetchone()
-        if not product:
-            c.rollback()
-            return await interaction.response.send_message("❌ Produto não encontrado. Use /loja para consultar os nomes.", ephemeral=True)
-        product_name, price, stock = product
-        balance_row = c.execute(
-            "SELECT balance FROM shop_balances WHERE guild_id=? AND user_id=?",
-            (interaction.guild_id, interaction.user.id)
-        ).fetchone()
-        balance = float(balance_row[0]) if balance_row else 0.0
-        if int(stock or 0) <= 0:
-            c.rollback()
-            return await interaction.response.send_message("❌ Esse produto está sem estoque. Fale com a equipe da loja.", ephemeral=True)
-        if balance < float(price):
-            c.rollback()
-            return await interaction.response.send_message(
-                f"❌ Saldo insuficiente. Preço: **{money(price)}** • Seu saldo: **{money(balance)}**.", ephemeral=True
-            )
-        c.execute(
-            "UPDATE shop_balances SET balance=balance-? WHERE guild_id=? AND user_id=?",
-            (float(price), interaction.guild_id, interaction.user.id)
-        )
-        c.execute("UPDATE shop_products SET stock=stock-1 WHERE name=? COLLATE NOCASE AND stock>0", (product_name,))
-        c.execute(
-            "INSERT INTO shop_orders(guild_id,user_id,product_name,price,status) VALUES(?,?,?,?, 'Pendente')",
-            (interaction.guild_id, interaction.user.id, product_name, float(price))
-        )
-        order_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
-        new_balance = c.execute(
-            "SELECT balance FROM shop_balances WHERE guild_id=? AND user_id=?",
-            (interaction.guild_id, interaction.user.id)
-        ).fetchone()[0]
-    order_channel_id = int(config_value("shop_orders_channel_id", "0") or 0)
-    order_channel = interaction.guild.get_channel(order_channel_id) if order_channel_id else None
-    if isinstance(order_channel, discord.TextChannel):
-        try:
-            await order_channel.send(embed=embed(
-                f"🛒 Novo pedido #{order_id}",
-                f"**Cliente:** {interaction.user.mention} (`{interaction.user.id}`)\n"
-                f"**Produto:** {product_name}\n**Valor:** {money(price)}\n**Status:** Pendente",
-                color=discord.Color.blue()))
-        except discord.HTTPException:
-            logging.exception("Pedido salvo, mas não foi possível avisar o canal de pedidos")
-    await interaction.response.send_message(
-        f"✅ Compra registrada! Pedido **#{order_id}**\nProduto: **{discord.utils.escape_markdown(product_name)}**\n"
-        f"Valor: **{money(price)}**\nSaldo restante: **{money(new_balance)}**\n\nA equipe dará andamento à entrega.",
-        ephemeral=True
-    )
-
-
-@bot.tree.command(name="avisar", description="Registra uma advertência para um membro.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-@app_commands.describe(membro="Membro", motivo="Motivo do aviso")
-async def avisar(interaction: discord.Interaction, membro: discord.Member, motivo: str):
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute(
-            "INSERT INTO warnings(guild_id,user_id,moderator_id,reason) VALUES(?,?,?,?)",
-            (interaction.guild_id, membro.id, interaction.user.id, motivo[:1000])
-        )
-        count = c.execute(
-            "SELECT COUNT(*) FROM warnings WHERE guild_id=? AND user_id=?",
-            (interaction.guild_id, membro.id)
-        ).fetchone()[0]
-    await interaction.response.send_message(
-        f"⚠️ Aviso registrado para {membro.mention}. Total de advertências: **{count}**. Motivo: {motivo[:900]}"
-    )
-
-
-@bot.tree.command(name="punicoes", description="Consulta as advertências de um membro.")
-@app_commands.guild_only()
-@app_commands.check(staff_check)
-@app_commands.describe(membro="Membro para consultar")
-async def punicoes(interaction: discord.Interaction, membro: discord.Member):
-    with sqlite3.connect(DB_PATH) as c:
-        rows = c.execute(
-            "SELECT reason,moderator_id,created_at FROM warnings WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 10",
-            (interaction.guild_id, membro.id)
-        ).fetchall()
-    if not rows:
-        return await interaction.response.send_message(f"✅ {membro.mention} não tem advertências registradas.", ephemeral=True)
-    details = "\n\n".join(
-        f"**{idx}.** {reason}\nPor: <@{moderator_id}> • {created_at}"
-        for idx, (reason, moderator_id, created_at) in enumerate(rows, 1)
-    )
-    await interaction.response.send_message(embed=embed(f"📋 Advertências de {membro.display_name}", details), ephemeral=True)
-
-
-@bot.tree.command(name="desbanir", description="Desbane um usuário usando seu ID do Discord.")
-@app_commands.guild_only()
-@app_commands.checks.has_permissions(ban_members=True)
-@app_commands.describe(usuario_id="ID numérico do usuário")
-async def desbanir(interaction: discord.Interaction, usuario_id: str):
-    raw_id = usuario_id.strip()
-    if not raw_id.isdigit():
-        return await interaction.response.send_message("Informe um ID numérico válido.", ephemeral=True)
-    try:
-        await interaction.guild.unban(discord.Object(id=int(raw_id)), reason=f"Desbanido por {interaction.user}")
-    except discord.NotFound:
-        return await interaction.response.send_message("Esse usuário não está banido ou o ID está incorreto.", ephemeral=True)
-    except discord.Forbidden:
-        return await interaction.response.send_message("O bot não tem permissão para desbanir usuários.", ephemeral=True)
-    await interaction.response.send_message(f"✅ Usuário com ID `{raw_id}` foi desbanido.")
-
-
-@bot.tree.command(name="silenciar", description="Aplica timeout temporário em um membro.")
-@app_commands.guild_only()
-@app_commands.checks.has_permissions(moderate_members=True)
-@app_commands.describe(membro="Membro", minutos="Duração em minutos", motivo="Motivo")
-async def silenciar(interaction: discord.Interaction, membro: discord.Member,
-                    minutos: app_commands.Range[int, 1, 40320], motivo: str = "Não informado"):
-    if membro.id == interaction.user.id:
-        return await interaction.response.send_message("Você não pode silenciar a si mesmo.", ephemeral=True)
-    if interaction.guild.owner_id != interaction.user.id and membro.top_role >= interaction.user.top_role:
-        return await interaction.response.send_message("O cargo desse membro é igual ou superior ao seu.", ephemeral=True)
-    try:
-        await membro.timeout(timedelta(minutes=int(minutos)), reason=motivo[:500])
-    except discord.Forbidden:
-        return await interaction.response.send_message("Não tenho permissão ou cargo suficiente para aplicar timeout.", ephemeral=True)
-    await interaction.response.send_message(f"🔇 {membro.mention} recebeu timeout por **{minutos} minuto(s)**. Motivo: {motivo[:800]}")
-
-
-@bot.tree.command(name="dessilenciar", description="Remove o timeout de um membro.")
-@app_commands.guild_only()
-@app_commands.checks.has_permissions(moderate_members=True)
-@app_commands.describe(membro="Membro")
-async def dessilenciar(interaction: discord.Interaction, membro: discord.Member):
-    try:
-        await membro.timeout(None, reason=f"Timeout removido por {interaction.user}")
-    except discord.Forbidden:
-        return await interaction.response.send_message("Não tenho permissão ou cargo suficiente para remover o timeout.", ephemeral=True)
-    await interaction.response.send_message(f"🔊 Timeout removido de {membro.mention}.")
-
-
-@bot.tree.command(name="ticket", description="Abre um ticket de atendimento.")
-@app_commands.guild_only()
-@app_commands.describe(motivo="Motivo do atendimento")
-async def ticket(interaction: discord.Interaction, motivo: str = "Atendimento geral"):
-    await create_ticket(interaction, "Atendimento", motivo)
-
-
-@bot.tree.command(name="fechar", description="Fecha o ticket atual.")
-@app_commands.guild_only()
-async def fechar(interaction: discord.Interaction):
-    channel = interaction.channel
-    if not isinstance(channel, discord.TextChannel):
-        return await interaction.response.send_message("Use este comando em um canal de texto.", ephemeral=True)
-    with sqlite3.connect(DB_PATH) as c:
-        row = c.execute("SELECT opener_id,status FROM tickets WHERE channel_id=?", (channel.id,)).fetchone()
-        if not row or row[1] != "open":
-            return await interaction.response.send_message("Este canal não é um ticket aberto registrado.", ephemeral=True)
-        if interaction.user.id != row[0] and not staff(interaction):
-            return await interaction.response.send_message("Só quem abriu o ticket ou a equipe pode fechá-lo.", ephemeral=True)
-        c.execute("UPDATE tickets SET status='closed',closed_by=?,closed_at=CURRENT_TIMESTAMP WHERE channel_id=?",
-                  (interaction.user.id, channel.id))
-    await interaction.response.send_message("🔒 Ticket fechado. O canal ficará arquivado.")
-    try:
-        await channel.edit(name=("fechado-" + channel.name)[:100])
-        await channel.set_permissions(interaction.guild.default_role, view_channel=False)
-    except discord.HTTPException:
-        logging.exception("Não foi possível arquivar o canal do ticket")
+            bot.add_view(PanelActionView(json.loads(buttons_json or "[]")), message_id=message_id)
+        except (ValueError, TypeError, discord.DiscordException):
+            log.exception("Não foi possível restaurar os botões do painel %s", message_id)
+    bot.tree.add_command(add_group)
+    bot.tree.add_command(edit_group)
+    bot.tree.add_command(remove_group)
+    bot.tree.add_command(spin_group)
+    bot.tree.add_command(embed_group)
+    async with bot:
+        await bot.start(TOKEN)
 
 
 if __name__ == "__main__":
-    if not TOKEN:
-        raise SystemExit("Configure DISCORD_TOKEN nas variáveis de ambiente.")
-    db_init()
-    bot.run(TOKEN)
+    import asyncio
+    asyncio.run(main())
