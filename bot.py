@@ -123,6 +123,18 @@ def panel_embed(title, description, category, image_url, color):
     return e
 
 
+def status_embed(title, description, *, success=None):
+    """Resposta curta no visual embed da ZORDX STORE."""
+    color = color_from(DEFAULT_COLOR)
+    if success is True:
+        color = discord.Color.green()
+    elif success is False:
+        color = discord.Color.red()
+    embed = discord.Embed(title=title[:256], description=description[:4000], color=color)
+    embed.set_footer(text=f"{SHOP_NAME} • Sistema da loja")
+    return embed
+
+
 class PanelActionView(discord.ui.View):
     def __init__(self, buttons=None):
         super().__init__(timeout=None)
@@ -140,17 +152,17 @@ class PanelActionView(discord.ui.View):
                         text_out = "Ainda não há produtos cadastrados na loja."
                     else:
                         text_out = "\n".join(f"**{n}** — {money(p)} • Estoque: {s}\n{d or 'Sem descrição'}" for n, d, p, s, _ in rows[:15])
-                    await interaction.response.send_message(text_out[:1900], ephemeral=True)
+                    await interaction.response.send_message(embed=status_embed("🛍️ Produtos da loja", text_out[:3800]), ephemeral=True)
                 elif "cupom" in key:
                     with db() as c:
                         rows = c.execute("SELECT code, percent, uses_left FROM coupons ORDER BY code").fetchall()
                     text_out = "\n".join(f"`{code}` — {pct}% de desconto • usos restantes: {uses}" for code, pct, uses in rows[:15]) or "Não há cupons cadastrados."
-                    await interaction.response.send_message(text_out[:1900], ephemeral=True)
+                    await interaction.response.send_message(embed=status_embed("🎟️ Cupons da loja", text_out[:3800]), ephemeral=True)
                 else:
                     support_id = int(cfg(interaction.guild_id or 0, "support_channel_id", "0") or 0)
                     channel = interaction.guild.get_channel(support_id) if interaction.guild and support_id else None
                     message = f"Para falar com a equipe, acesse {channel.mention}." if channel else "Entre em contato com a equipe da loja para receber suporte."
-                    await interaction.response.send_message(message, ephemeral=True)
+                    await interaction.response.send_message(embed=status_embed("🎧 Suporte da loja", message), ephemeral=True)
             button.callback = callback
             self.add_item(button)
 
@@ -440,7 +452,8 @@ async def editar_painel(interaction: discord.Interaction):
         rows = c.execute("SELECT id,title,channel_id FROM zordx_panels WHERE guild_id=? ORDER BY id DESC", (interaction.guild_id,)).fetchall()
     if not rows:
         return await interaction.response.send_message("Ainda não há painéis criados por este bot registrados neste servidor. Use `/add painel` primeiro.", ephemeral=True)
-    await interaction.response.send_message("Selecione o painel. As alterações serão aplicadas à mensagem original, sem criar uma cópia.", view=PanelSelectView(rows), ephemeral=True)
+    e = status_embed("✏️ Editar painel", "Selecione um painel criado por este bot. As alterações serão aplicadas à mensagem original, sem publicar uma cópia.")
+    await interaction.response.send_message(embed=e, view=PanelSelectView(rows), ephemeral=True)
 
 
 @bot.tree.command(name="ajuda-vendas", description="Ajuda para usar os comandos de vendas")
@@ -451,15 +464,18 @@ async def ajuda_vendas(interaction: discord.Interaction):
             "`/add painel` — criar painel com prévia\n`/editar painel` — editar painel existente (Premium)\n"
             "`/cupons` — listar cupons (Premium)\n`/addcupom` — criar cupom (Premium)\n"
             "`/tirar cupom` — remover cupom (Premium)\n`/saldo` e `/sacar` — consultar saldo e solicitar saque\n`/config` — configurar a loja\n`/config-ticket` — configurar categoria, suporte, logs e painel de tickets.")
-    await interaction.response.send_message(text, ephemeral=True)
+    e = status_embed("📚 Ajuda de vendas", text)
+    e.add_field(name="Painéis", value="`/add painel` • `/editar painel` • `/tirarpainel`", inline=False)
+    e.add_field(name="Tickets", value="`/config-ticket` configura canal, categoria, suporte, logs e limite de tickets.", inline=False)
+    await interaction.response.send_message(embed=e, ephemeral=True)
 
 
 @bot.tree.command(name="produtos", description="Mostrar catálogo, preços e estoque")
 async def produtos(interaction: discord.Interaction):
     rows = get_products()
     if not rows:
-        return await interaction.response.send_message("Ainda não há produtos cadastrados.", ephemeral=True)
-    e = discord.Embed(title=f"🛍️ Produtos — {SHOP_NAME}", color=color_from(DEFAULT_COLOR))
+        return await interaction.response.send_message(embed=status_embed("🛍️ Catálogo de produtos", "Ainda não há produtos cadastrados na loja."), ephemeral=True)
+    e = discord.Embed(title=f"🛍️ Produtos — {SHOP_NAME}", description="Confira os produtos, preços e disponibilidade abaixo.", color=color_from(DEFAULT_COLOR))
     for name, description, price, stock, link in rows[:25]:
         value = f"**Preço:** {money(price)}\n**Estoque:** {stock}\n{description or 'Sem descrição'}"
         if link:
@@ -507,7 +523,7 @@ async def girar_produto(interaction: discord.Interaction, nome: str):
 async def cupons(interaction: discord.Interaction):
     with db() as c:
         rows = c.execute("SELECT code,percent,uses_left FROM coupons ORDER BY code").fetchall()
-    e = discord.Embed(title="🎟️ Cupons da loja", color=color_from(DEFAULT_COLOR))
+    e = discord.Embed(title=f"🎟️ Cupons — {SHOP_NAME}", description="Cupons disponíveis e usos restantes.", color=color_from(DEFAULT_COLOR))
     if not rows:
         e.description = "Nenhum cupom cadastrado."
     else:
@@ -577,7 +593,8 @@ async def tirarpainel(interaction: discord.Interaction):
         rows = c.execute("SELECT id,title,channel_id FROM zordx_panels WHERE guild_id=? ORDER BY id DESC", (interaction.guild_id,)).fetchall()
     if not rows:
         return await interaction.response.send_message("Não há painéis registrados para remover.", ephemeral=True)
-    await interaction.response.send_message("Selecione o painel. A mensagem original será apagada.", view=RemovePanelView(rows), ephemeral=True)
+    e = status_embed("🗑️ Remover painel", "Selecione o painel que deseja remover. A mensagem original será apagada.", success=False)
+    await interaction.response.send_message(embed=e, view=RemovePanelView(rows), ephemeral=True)
 
 
 @bot.tree.command(name="entregas", description="Configurar canal de avisos de entrega (Premium)")
@@ -608,7 +625,9 @@ async def config(interaction: discord.Interaction, canal_loja: discord.TextChann
         support = interaction.guild.get_channel(int(cfg(interaction.guild_id, "support_channel_id", "0") or 0)) if interaction.guild else None
         withdrawal = interaction.guild.get_channel(int(cfg(interaction.guild_id, "withdrawal_channel_id", "0") or 0)) if interaction.guild else None
         changed = [f"Canal da loja: {shop.mention if shop else 'não definido'}", f"Suporte: {support.mention if support else 'não definido'}", f"Saques: {withdrawal.mention if withdrawal else 'não definido'}"]
-    await interaction.response.send_message("⚙️ **Configuração da loja**\n" + "\n".join(changed), ephemeral=True)
+    e = status_embed("⚙️ Configurações da loja", "\n".join(f"• {item}" for item in changed), success=True)
+    e.add_field(name="Como usar", value="Passe os parâmetros do comando `/config` para alterar os canais.", inline=False)
+    await interaction.response.send_message(embed=e, ephemeral=True)
 
 
 @bot.tree.command(name="config-ticket", description="Configurar e publicar o sistema de tickets")
@@ -663,8 +682,10 @@ async def config_ticket(
         panel_title = cfg(guild.id, "ticket_panel_title", "🎫 Central de Atendimento")
         panel_description = cfg(guild.id, "ticket_panel_description", "Precisa de ajuda? Clique no botão abaixo para abrir um ticket privado com a equipe.")
         embed = discord.Embed(title=panel_title[:256], description=panel_description[:4000], color=color_from(DEFAULT_COLOR))
-        embed.add_field(name="🔒 Atendimento privado", value="Somente você e a equipe autorizada poderão ver seu ticket.", inline=False)
-        embed.set_footer(text=f"{SHOP_NAME} • Suporte")
+        embed.add_field(name="🔒 Atendimento privado", value="Somente você e a equipe autorizada poderão ver seu ticket.", inline=True)
+        embed.add_field(name="⚡ Como funciona", value="Clique em **Abrir ticket** e descreva o que precisa. A equipe responderá dentro do canal privado.", inline=True)
+        embed.add_field(name="🧾 Antes de abrir", value="Envie detalhes e imagens úteis para agilizar o atendimento.", inline=False)
+        embed.set_footer(text=f"{SHOP_NAME} • Central de suporte")
         try:
             await canal_painel.send(embed=embed, view=TicketPanelView())
             changes.append(f"Painel publicado em {canal_painel.mention}")
@@ -685,7 +706,10 @@ async def config_ticket(
             f"Limite por usuário: {cfg(guild.id, 'ticket_open_limit', '1')} ticket(s)"
         ]
         changes.append("Para publicar o painel, escolha o parâmetro `canal_painel`.")
-    await interaction.response.send_message("🎫 **Configuração de tickets**\n" + "\n".join(f"• {item}" for item in changes), ephemeral=True)
+    ticket_embed = status_embed("🎫 Configuração de tickets", "\n".join(f"• {item}" for item in changes), success=True)
+    ticket_embed.add_field(name="Opções disponíveis", value="Canal do painel • Categoria • Cargo de suporte • Canal de logs • Título • Descrição • Mensagem de boas-vindas • Limite de tickets por usuário", inline=False)
+    ticket_embed.set_footer(text=f"{SHOP_NAME} • Configure com /config-ticket")
+    await interaction.response.send_message(embed=ticket_embed, ephemeral=True)
 
 
 @bot.tree.command(name="saldo", description="Consultar seu saldo disponível para saque")
@@ -693,7 +717,9 @@ async def saldo(interaction: discord.Interaction):
     with db() as c:
         row = c.execute("SELECT balance FROM zordx_balances WHERE guild_id=? AND user_id=?", (interaction.guild_id, interaction.user.id)).fetchone()
     balance = float(row[0]) if row else 0.0
-    await interaction.response.send_message(f"💰 Seu saldo registrado para saque é **{money(balance)}**. O saldo precisa ser atualizado pelo sistema de vendas da loja.", ephemeral=True)
+    e = status_embed("💰 Seu saldo", f"**Saldo registrado:** {money(balance)}\n\nO saldo precisa ser atualizado pelo sistema de vendas da loja para refletir vendas reais.")
+    e.add_field(name="Conta", value=interaction.user.mention, inline=True)
+    await interaction.response.send_message(embed=e, ephemeral=True)
 
 
 @bot.tree.command(name="sacar", description="Solicitar saque do saldo registrado")
@@ -703,15 +729,17 @@ async def sacar(interaction: discord.Interaction, valor: app_commands.Range[floa
         row = c.execute("SELECT balance FROM zordx_balances WHERE guild_id=? AND user_id=?", (interaction.guild_id, interaction.user.id)).fetchone()
     balance = float(row[0]) if row else 0.0
     if float(valor) > balance:
-        return await interaction.response.send_message(f"Saldo insuficiente. Seu saldo registrado é {money(balance)}.", ephemeral=True)
+        return await interaction.response.send_message(embed=status_embed("❌ Saldo insuficiente", f"Você solicitou **{money(valor)}**, mas seu saldo registrado é **{money(balance)}**.", success=False), ephemeral=True)
     with db() as c:
         c.execute("INSERT INTO zordx_withdrawals(guild_id,user_id,amount) VALUES(?,?,?)", (interaction.guild_id, interaction.user.id, float(valor)))
         c.execute("UPDATE zordx_balances SET balance=balance-? WHERE guild_id=? AND user_id=?", (float(valor), interaction.guild_id, interaction.user.id))
-    await interaction.response.send_message(f"✅ Solicitação de saque de **{money(valor)}** registrada. A equipe precisa revisar e concluir o pagamento.", ephemeral=True)
+    e = status_embed("💸 Solicitação de saque registrada", f"**Valor:** {money(valor)}\n**Status:** Pendente de revisão\n\nA equipe da loja precisa revisar e concluir o pagamento.", success=True)
+    await interaction.response.send_message(embed=e, ephemeral=True)
     channel_id = int(cfg(interaction.guild_id, "withdrawal_channel_id", "0") or 0)
     channel = interaction.guild.get_channel(channel_id) if interaction.guild and channel_id else None
     if isinstance(channel, discord.TextChannel):
-        await channel.send(f"💸 **Solicitação de saque**\nUsuário: {interaction.user.mention}\nValor: **{money(valor)}**\nStatus: Pendente")
+        log_embed = status_embed("💸 Nova solicitação de saque", f"**Usuário:** {interaction.user.mention}\n**Valor:** {money(valor)}\n**Status:** Pendente de revisão")
+        await channel.send(embed=log_embed)
 
 
 @bot.tree.error
