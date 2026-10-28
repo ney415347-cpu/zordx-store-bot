@@ -1745,7 +1745,7 @@ async def saldo(interaction: discord.Interaction):
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.describe(membro="Membro que receberá o saldo", valor="Valor em reais")
 async def adicionar_saldo(interaction: discord.Interaction, membro: discord.Member,
-                          valor: app_commands.Range[float, 0.01, 100000000]):
+                          valor: app_commands.Range[float, 0.01, 100000000.0]):
     with sqlite3.connect(DB_PATH) as c:
         c.execute(
             "INSERT INTO shop_balances(guild_id,user_id,balance) VALUES(?,?,?) "
