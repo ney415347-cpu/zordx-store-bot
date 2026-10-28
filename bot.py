@@ -303,4 +303,719 @@ class BotoesCriarEmbed(discord.ui.View):
         await interaction.response.send_message("⚡ Gerando embed com IA...", ephemeral=True)
 
     @discord.ui.button(label="Adicionar Botão", style=discord.ButtonStyle.gray, emoji="🔗", row=1)
-    async def add_botao(self, interaction: discord.Interaction, button: discord.ui.Button
+    
+    async def add_botao(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CriarBotaoModal())
+
+
+class CriarBotaoModal(discord.ui.Modal, title="Criar botão de link"):
+    texto = discord.ui.TextInput(label="Texto do botão", max_length=80)
+    url = discord.ui.TextInput(
+        label="URL do botão",
+        placeholder="https://exemplo.com",
+        max_length=500
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        link = str(self.url.value).strip()
+        if not link.startswith(("https://", "http://")):
+            await interaction.response.send_message(
+                "❌ A URL deve começar com https:// ou http://.",
+                ephemeral=True
+            )
+            return
+
+        view = discord.ui.View(timeout=300)
+        view.add_item(discord.ui.Button(label=str(self.texto.value), url=link))
+        await interaction.response.send_message(
+            "✅ Botão criado!",
+            view=view,
+            ephemeral=True
+        )
+
+
+class ModalEmbed(discord.ui.Modal, title="Criar Embed"):
+    titulo = discord.ui.TextInput(label="Título", max_length=256)
+    descricao = discord.ui.TextInput(
+        label="Descrição",
+        style=discord.TextStyle.paragraph,
+        max_length=3500
+    )
+    cor = discord.ui.TextInput(
+        label="Cor hexadecimal",
+        placeholder="3498DB",
+        required=False,
+        max_length=6
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        codigo = str(self.cor.value).strip().lstrip("#")
+        try:
+            cor = discord.Color(int(codigo, 16)) if codigo else discord.Color(COR_AZUL)
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ Código de cor inválido. Exemplo: 3498DB.",
+                ephemeral=True
+            )
+            return
+
+        if codigo and len(codigo) not in (3, 6):
+            await interaction.response.send_message(
+                "❌ Use uma cor hexadecimal válida.",
+                ephemeral=True
+            )
+            return
+
+        emb = discord.Embed(
+            title=str(self.titulo.value),
+            description=str(self.descricao.value),
+            color=cor
+        )
+        await interaction.response.send_message(
+            "Prévia do seu Embed:",
+            embed=emb,
+            ephemeral=True
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+#                    🎫 PAINEL DE TICKETS
+# ═══════════════════════════════════════════════════════════════
+
+class FecharTicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Fechar ticket",
+        style=discord.ButtonStyle.danger,
+        emoji="🔒",
+        custom_id="zordx:fechar_ticket"
+    )
+    async def fechar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        canal = interaction.channel
+        if not isinstance(canal, discord.TextChannel):
+            await interaction.response.send_message("Canal inválido.", ephemeral=True)
+            return
+
+        with sqlite3.connect(DB_PATH) as c:
+            registro = c.execute(
+                "SELECT opener_id, status FROM tickets WHERE channel_id=?",
+                (canal.id,)
+            ).fetchone()
+
+        if not registro:
+            await interaction.response.send_message(
+                "Este canal não está registrado como ticket.",
+                ephemeral=True
+            )
+            return
+
+        opener_id, status = registro
+        membro = interaction.user
+        autorizado = (
+            membro.id == opener_id
+            or (
+                isinstance(membro, discord.Member)
+                and (
+                    membro.guild_permissions.manage_channels
+                    or membro.guild_permissions.administrator
+                    or any(
+                        cargo.id == TICKET_SUPPORT_ROLE_ID
+                        for cargo in membro.roles
+                    ) if TICKET_SUPPORT_ROLE_ID else
+                    membro.guild_permissions.manage_channels
+                    or membro.guild_permissions.administrator
+                )
+            )
+        )
+
+        if not autorizado:
+            await interaction.response.send_message(
+                "❌ Você não tem permissão para fechar este ticket.",
+                ephemeral=True
+            )
+            return
+
+        if status == "closed":
+            await interaction.response.send_message(
+                "Este ticket já está fechado.",
+                ephemeral=True
+            )
+            return
+
+        with sqlite3.connect(DB_PATH) as c:
+            c.execute(
+                "UPDATE tickets SET status='closed', closed_by=?, closed_at=? "
+                "WHERE channel_id=?",
+                (
+                    interaction.user.id,
+                    datetime.now(timezone.utc).isoformat(),
+                    canal.id
+                )
+            )
+
+        await canal.set_permissions(
+            interaction.guild.default_role,
+            view_channel=False
+        )
+        await interaction.response.send_message(
+            f"🔒 Ticket fechado por {interaction.user.mention}."
+        )
+
+
+class TipoTicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        opcoes = [
+            discord.SelectOption(label=nome, emoji=emoji, value=nome)
+            for nome, emoji in TICKET_TYPES
+        ]
+        seletor = discord.ui.Select(
+            placeholder="Selecione o motivo do atendimento",
+            options=opcoes
+        )
+        seletor.callback = self.selecionar
+        self.add_item(seletor)
+
+    async def selecionar(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message(
+                "Use este painel dentro de um servidor.",
+                ephemeral=True
+            )
+            return
+
+        tipo = interaction.data["values"][0]
+
+        with sqlite3.connect(DB_PATH) as c:
+            registro = c.execute(
+                "SELECT channel_id FROM tickets "
+                "WHERE guild_id=? AND opener_id=? AND status='open'",
+                (guild.id, interaction.user.id)
+            ).fetchone()
+
+        if registro:
+            canal_existente = guild.get_channel(registro[0])
+            if canal_existente:
+                await interaction.response.send_message(
+                    f"Você já possui um ticket aberto: {canal_existente.mention}",
+                    ephemeral=True
+                )
+                return
+
+        categoria = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
+        if not isinstance(categoria, discord.CategoryChannel):
+            categoria = None
+
+        permissoes = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
+        }
+
+        if guild.me:
+            permissoes[guild.me] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                manage_channels=True
+            )
+
+        cargo = guild.get_role(TICKET_SUPPORT_ROLE_ID) if TICKET_SUPPORT_ROLE_ID else None
+        if cargo:
+            permissoes[cargo] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True
+            )
+
+        nome = f"ticket-{interaction.user.name}".lower().replace(" ", "-")[:90]
+
+        try:
+            canal = await guild.create_text_channel(
+                name=nome,
+                category=categoria,
+                overwrites=permissoes
+            )
+            with sqlite3.connect(DB_PATH) as c:
+                c.execute(
+                    "INSERT INTO tickets(channel_id,guild_id,opener_id,status,ticket_type) "
+                    "VALUES(?,?,?,'open',?)",
+                    (canal.id, guild.id, interaction.user.id, tipo)
+                )
+
+            await canal.send(
+                content=interaction.user.mention,
+                embed=embed(
+                    f"🎫 Ticket — {tipo}",
+                    "Explique sua solicitação. Nossa equipe responderá assim que possível.",
+                    COR_DESTAQUE
+                ),
+                view=FecharTicketView()
+            )
+            await interaction.response.send_message(
+                f"✅ Ticket criado: {canal.mention}",
+                ephemeral=True
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ Não tenho permissão para criar canais.",
+                ephemeral=True
+            )
+
+
+# ═══════════════════════════════════════════════════════════════
+#                    🛍️ PRODUTOS E CUPONS
+# ═══════════════════════════════════════════════════════════════
+
+produto_group = app_commands.Group(
+    name="produto",
+    description="Gerenciar os produtos da loja"
+)
+
+
+@produto_group.command(name="adicionar", description="Cadastrar um produto")
+@app_commands.check(staff_check)
+async def produto_adicionar(
+    interaction: discord.Interaction,
+    nome: str,
+    preco: float,
+    estoque: int,
+    descricao: str,
+    link: str = ""
+):
+    if preco < 0 or estoque < 0:
+        await interaction.response.send_message(
+            "Preço e estoque não podem ser negativos.",
+            ephemeral=True
+        )
+        return
+
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute(
+            "INSERT OR REPLACE INTO shop_products"
+            "(name,description,price,stock,link) VALUES(?,?,?,?,?)",
+            (nome, descricao, preco, estoque, link)
+        )
+
+    await interaction.response.send_message(
+        f"✅ Produto **{nome}** cadastrado por {money(preco)}.",
+        ephemeral=True
+    )
+
+
+@produto_group.command(name="listar", description="Listar produtos da loja")
+async def produto_listar(interaction: discord.Interaction):
+    produtos = get_products()
+    if not produtos:
+        await interaction.response.send_message(
+            "Nenhum produto cadastrado.",
+            ephemeral=True
+        )
+        return
+
+    emb = embed("🛍️ ZORDX STORE — Produtos", "Confira nosso catálogo.")
+    for p in produtos[:25]:
+        descricao = (
+            f"Preço: {p.get('price', 'Consultar')}\n"
+            f"Estoque: {p.get('stock', 'Consultar')}\n"
+            f"{p.get('description', '')}"
+        )
+        link = p.get("link", "")
+        if isinstance(link, str) and link.startswith(("https://", "http://")):
+            descricao += f"\n[Ver produto]({link})"
+        emb.add_field(
+            name=str(p.get("name", "Produto"))[:256],
+            value=descricao[:1024],
+            inline=False
+        )
+
+    await interaction.response.send_message(embed=emb)
+
+
+@produto_group.command(name="remover", description="Remover produto")
+@app_commands.check(staff_check)
+async def produto_remover(interaction: discord.Interaction, nome: str):
+    with sqlite3.connect(DB_PATH) as c:
+        cur = c.execute(
+            "DELETE FROM shop_products WHERE name=? COLLATE NOCASE",
+            (nome,)
+        )
+
+    await interaction.response.send_message(
+        "✅ Produto removido." if cur.rowcount else "Produto não encontrado.",
+        ephemeral=True
+    )
+
+
+cupom_group = app_commands.Group(
+    name="cupom",
+    description="Gerenciar cupons de desconto"
+)
+
+
+@cupom_group.command(name="criar", description="Criar cupom")
+@app_commands.check(staff_check)
+async def cupom_criar(
+    interaction: discord.Interaction,
+    codigo: str,
+    percentual: app_commands.Range[int, 1, 100],
+    usos: app_commands.Range[int, 1, 10000]
+):
+    try:
+        with sqlite3.connect(DB_PATH) as c:
+            c.execute(
+                "INSERT INTO coupons(code,percent,uses_left,created_by) VALUES(?,?,?,?)",
+                (codigo.upper().strip(), percentual, usos, interaction.user.id)
+            )
+    except sqlite3.IntegrityError:
+        await interaction.response.send_message(
+            "Já existe um cupom com esse código.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"✅ Cupom **{codigo.upper()}** criado: {percentual}% de desconto, "
+        f"{usos} uso(s).",
+        ephemeral=True
+    )
+
+
+@cupom_group.command(name="listar", description="Listar cupons")
+@app_commands.check(staff_check)
+async def cupom_listar(interaction: discord.Interaction):
+    with sqlite3.connect(DB_PATH) as c:
+        rows = c.execute(
+            "SELECT code,percent,uses_left FROM coupons ORDER BY code"
+        ).fetchall()
+
+    if not rows:
+        await interaction.response.send_message(
+            "Nenhum cupom cadastrado.",
+            ephemeral=True
+        )
+        return
+
+    emb = embed("🎟️ Cupons da loja", "Cupons cadastrados.")
+    for codigo, percentual, usos in rows[:25]:
+        emb.add_field(
+            name=codigo,
+            value=f"Desconto: {percentual}%\nUsos restantes: {usos}",
+            inline=True
+        )
+
+    await interaction.response.send_message(embed=emb, ephemeral=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+#                    🛡️ MODERAÇÃO
+# ═══════════════════════════════════════════════════════════════
+
+moderacao_group = app_commands.Group(
+    name="moderacao",
+    description="Comandos de moderação"
+)
+
+
+@moderacao_group.command(name="advertir", description="Advertir membro")
+@app_commands.check(staff_check)
+async def moderacao_advertir(
+    interaction: discord.Interaction,
+    membro: discord.Member,
+    motivo: str
+):
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute(
+            "INSERT INTO warnings(guild_id,user_id,moderator_id,reason) VALUES(?,?,?,?)",
+            (interaction.guild_id, membro.id, interaction.user.id, motivo)
+        )
+
+    await interaction.response.send_message(
+        f"⚠️ {membro.mention} recebeu uma advertência.\nMotivo: {motivo}"
+    )
+
+
+@moderacao_group.command(name="avisos", description="Consultar advertências")
+@app_commands.check(staff_check)
+async def moderacao_avisos(
+    interaction: discord.Interaction,
+    membro: discord.Member
+):
+    with sqlite3.connect(DB_PATH) as c:
+        rows = c.execute(
+            "SELECT reason,moderator_id,created_at FROM warnings "
+            "WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 10",
+            (interaction.guild_id, membro.id)
+        ).fetchall()
+
+    if not rows:
+        await interaction.response.send_message(
+            "Este membro não possui advertências.",
+            ephemeral=True
+        )
+        return
+
+    emb = embed("⚠️ Advertências", f"Histórico de {membro.mention}")
+    for motivo, moderador, data in rows:
+        emb.add_field(
+            name=f"Moderador: {moderador} • {data}",
+            value=motivo or "Sem motivo",
+            inline=False
+        )
+
+    await interaction.response.send_message(embed=emb, ephemeral=True)
+
+
+@moderacao_group.command(name="limpar", description="Apagar mensagens")
+@app_commands.check(staff_check)
+async def moderacao_limpar(
+    interaction: discord.Interaction,
+    quantidade: app_commands.Range[int, 1, 100]
+):
+    if not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.response.send_message(
+            "Use este comando em um canal de texto.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    apagadas = await interaction.channel.purge(limit=quantidade)
+    await interaction.followup.send(
+        f"🧹 {len(apagadas)} mensagem(ns) apagada(s).",
+        ephemeral=True
+    )
+
+
+@moderacao_group.command(name="timeout", description="Aplicar timeout")
+@app_commands.check(staff_check)
+async def moderacao_timeout(
+    interaction: discord.Interaction,
+    membro: discord.Member,
+    minutos: app_commands.Range[int, 1, 40320],
+    motivo: str = "Não informado"
+):
+    try:
+        await membro.timeout(timedelta(minutes=minutos), reason=motivo)
+        await interaction.response.send_message(
+            f"⏱️ Timeout aplicado a {membro.mention} por {minutos} minuto(s)."
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "Não tenho permissão para aplicar timeout.",
+            ephemeral=True
+        )
+
+
+@moderacao_group.command(name="expulsar", description="Expulsar membro")
+@app_commands.check(staff_check)
+async def moderacao_expulsar(
+    interaction: discord.Interaction,
+    membro: discord.Member,
+    motivo: str = "Não informado"
+):
+    try:
+        await membro.kick(reason=motivo)
+        await interaction.response.send_message(
+            f"👢 {membro} foi expulso. Motivo: {motivo}"
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "Não tenho permissão para expulsar esse membro.",
+            ephemeral=True
+        )
+
+
+@moderacao_group.command(name="banir", description="Banir membro")
+@app_commands.check(staff_check)
+async def moderacao_banir(
+    interaction: discord.Interaction,
+    membro: discord.Member,
+    motivo: str = "Não informado"
+):
+    try:
+        await membro.ban(reason=motivo)
+        await interaction.response.send_message(
+            f"🔨 {membro} foi banido. Motivo: {motivo}"
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "Não tenho permissão para banir esse membro.",
+            ephemeral=True
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+#                    📣 COMANDOS GERAIS
+# ═══════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="ping", description="Verificar latência do bot")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        f"🏓 Pong! Latência: {round(bot.latency * 1000)} ms."
+    )
+
+
+@bot.tree.command(name="ajuda", description="Ver comandos da ZORDX STORE BOT")
+async def ajuda(interaction: discord.Interaction):
+    emb = embed(
+        "🤖 ZORDX STORE BOT — Ajuda",
+        "Comandos disponíveis:\n\n"
+        "🎫 `/ticket painel` — publicar painel de tickets\n"
+        "🎨 `/embed criar` — abrir criador de embeds\n"
+        "🛍️ `/produto adicionar` — cadastrar produto\n"
+        "🛍️ `/produto listar` — listar produtos\n"
+        "🛍️ `/produto remover` — remover produto\n"
+        "🎟️ `/cupom criar` — criar cupom\n"
+        "🎟️ `/cupom listar` — listar cupons\n"
+        "🛡️ `/moderacao advertir`\n"
+        "🛡️ `/moderacao avisos`\n"
+        "🛡️ `/moderacao limpar`\n"
+        "🛡️ `/moderacao timeout`\n"
+        "🛡️ `/moderacao expulsar`\n"
+        "🛡️ `/moderacao banir`\n"
+        "🏓 `/ping`"
+    )
+    await interaction.response.send_message(embed=emb, ephemeral=True)
+
+
+@bot.tree.command(name="embed", description="Abrir painel de criação de embeds")
+@app_commands.describe(acao="Escolha a ação")
+@app_commands.choices(acao=[
+    app_commands.Choice(name="Criar", value="criar"),
+    app_commands.Choice(name="Cores", value="cores")
+])
+async def embed_comando(
+    interaction: discord.Interaction,
+    acao: app_commands.Choice[str]
+):
+    if acao.value == "criar":
+        await interaction.response.send_modal(ModalEmbed())
+    else:
+        await interaction.response.send_message(
+            embed=embed_cores_disponiveis(),
+            ephemeral=True
+        )
+
+
+ticket_group = app_commands.Group(name="ticket", description="Sistema de tickets")
+
+
+@ticket_group.command(name="painel", description="Publicar painel de tickets")
+@app_commands.check(staff_check)
+async def ticket_painel(interaction: discord.Interaction):
+    emb = embed(
+        "🎫 Atendimento — ZORDX STORE",
+        "Clique no menu abaixo e selecione o motivo do atendimento.\n"
+        "Um canal privado será criado para você.",
+        COR_DESTAQUE
+    )
+    await interaction.channel.send(embed=emb, view=TipoTicketView())
+    await interaction.response.send_message(
+        "✅ Painel de tickets publicado.",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="anunciar", description="Enviar anúncio no canal atual")
+@app_commands.check(staff_check)
+@app_commands.describe(titulo="Título do anúncio", mensagem="Conteúdo do anúncio")
+async def anunciar(
+    interaction: discord.Interaction,
+    titulo: str,
+    mensagem: str
+):
+    await interaction.channel.send(
+        embed=embed(f"📢 {titulo}", mensagem, COR_DESTAQUE)
+    )
+    await interaction.response.send_message(
+        "✅ Anúncio publicado.",
+        ephemeral=True
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+#                    ⚙️ INICIALIZAÇÃO
+# ═══════════════════════════════════════════════════════════════
+
+@bot.event
+async def on_ready():
+    logging.info("Bot conectado como %s (%s)", bot.user, bot.user.id)
+
+    if not getattr(bot, "_views_registradas", False):
+        bot.add_view(FecharTicketView())
+        bot._views_registradas = True
+
+    if not getattr(bot, "_comandos_sincronizados", False):
+        try:
+            bot.tree.add_command(produto_group)
+            bot.tree.add_command(cupom_group)
+            bot.tree.add_command(moderacao_group)
+            bot.tree.add_command(ticket_group)
+
+            if GUILD_ID:
+                guild_obj = discord.Object(id=GUILD_ID)
+                bot.tree.copy_global_to(guild=guild_obj)
+                sincronizados = await bot.tree.sync(guild=guild_obj)
+            else:
+                sincronizados = await bot.tree.sync()
+
+            logging.info("%s comandos sincronizados.", len(sincronizados))
+            bot._comandos_sincronizados = True
+        except Exception:
+            logging.exception("Erro ao sincronizar comandos")
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    if not WELCOME_CHANNEL_ID:
+        return
+
+    canal = member.guild.get_channel(WELCOME_CHANNEL_ID)
+    if canal:
+        await canal.send(
+            embed=embed(
+                f"👋 Bem-vindo à {SHOP_NAME}!",
+                f"Olá, {member.mention}! Seja bem-vindo ao servidor.",
+                COR_DESTAQUE
+            )
+        )
+
+
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError
+):
+    logging.error("Erro de comando: %s", error)
+
+    if isinstance(error, app_commands.CheckFailure):
+        mensagem = "❌ Você não tem permissão para usar este comando."
+    else:
+        mensagem = "❌ Ocorreu um erro ao executar o comando. Confira os logs."
+
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(mensagem, ephemeral=True)
+        else:
+            await interaction.response.send_message(mensagem, ephemeral=True)
+    except discord.HTTPException:
+        pass
+
+
+if __name__ == "__main__":
+    db_init()
+
+    if not TOKEN:
+        raise RuntimeError(
+            "DISCORD_TOKEN não foi configurado nas variáveis de ambiente."
+        )
+
+    bot.run(TOKEN)
+
