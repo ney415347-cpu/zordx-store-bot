@@ -62,6 +62,13 @@ def db_init():
             quantity INTEGER, seller_id INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
         c.execute("""CREATE TABLE IF NOT EXISTS shop_config(
             key TEXT PRIMARY KEY, value TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS shop_balances(
+            guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, balance REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(guild_id, user_id))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS shop_orders(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+            product_name TEXT NOT NULL, price REAL NOT NULL, status TEXT NOT NULL DEFAULT 'Pendente',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
         c.execute("""CREATE TABLE IF NOT EXISTS member_profiles(
             guild_id INTEGER, user_id INTEGER, bio TEXT DEFAULT '', points INTEGER DEFAULT 0,
             PRIMARY KEY(guild_id, user_id))""")
@@ -137,7 +144,7 @@ def save_config(key, value):
         c.execute("INSERT OR REPLACE INTO shop_config(key,value) VALUES(?,?)", (key, str(value)))
 
 
-async def create_ticket(interaction: discord.Interaction, ticket_type: str):
+async def create_ticket(interaction: discord.Interaction, ticket_type: str, reason: str = ""):
     guild = interaction.guild
     if not guild:
         return await interaction.response.send_message("Use dentro do servidor.", ephemeral=True)
@@ -185,7 +192,7 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str):
         channel_name = "-".join(part for part in channel_name.split("-") if part)[:95] or f"ticket-{interaction.user.id}"
         channel = await guild.create_text_channel(
             channel_name, category=category, overwrites=perms,
-            topic=f"Ticket de {interaction.user} | Categoria: {ticket_type} | ID: {interaction.user.id}"
+            topic=f"Ticket de {interaction.user} | Categoria: {ticket_type} | ID: {interaction.user.id}" + (f" | Motivo: {reason[:500]}" if reason else "")
         )
         with sqlite3.connect(DB_PATH) as c:
             c.execute(
@@ -193,8 +200,9 @@ async def create_ticket(interaction: discord.Interaction, ticket_type: str):
                 "VALUES(?,?,?,'open',?)",
                 (channel.id, guild.id, interaction.user.id, ticket_type)
             )
+        reason_text = f"\n\n**Motivo informado:** {discord.utils.escape_markdown(reason[:500])}" if reason else ""
         e = embed(f"🎫 {ticket_type} — {SHOP_NAME}",
-                  f"Olá {interaction.user.mention}! Explique como podemos ajudar.\n\n"
+                  f"Olá {interaction.user.mention}! Explique como podemos ajudar.{reason_text}\n\n"
                   "🔒 Este canal é privado. Nunca envie senhas ou códigos de autenticação.",
                   color=discord.Color.blue())
         open_image = config_value(f"ticket_open_image_{guild.id}", "").strip()
@@ -969,7 +977,7 @@ async def rankset(interaction: discord.Interaction, membro: discord.Member, rank
 @app_commands.describe(produto="Nome do produto", valor="Valor total recebido em reais",
                        quantidade="Quantidade vendida")
 async def registrar_venda(interaction: discord.Interaction, produto: str,
-                           valor: app_commands.Range[float, 0.01, 100000000.0],
+                           valor: app_commands.Range[float, 0.01, 100000000],
                            quantidade: app_commands.Range[int, 1, 1000000] = 1):
     with sqlite3.connect(DB_PATH) as c:
         c.execute(
@@ -1038,52 +1046,14 @@ async def warn(interaction: discord.Interaction, membro: discord.Member, motivo:
     )
 
 
-
-@bot.tree.command(
-    name="advertencias",
-    description="Consulta suas advertências ou as de outro membro."
-)
+@bot.tree.command(name="advertencias", description="Consulta advertências de membro.")
+@app_commands.describe(membro="Membro")
 @app_commands.guild_only()
-@app_commands.describe(
-    membro="Opcional: membro que deseja consultar (somente equipe)"
-)
-async def warnings(
-    interaction: discord.Interaction,
-    membro: discord.Member = None
-):
-    alvo = membro or interaction.user
-
-    # Membros comuns só podem consultar as próprias advertências.
-    if not staff(interaction) and alvo.id != interaction.user.id:
-        return await interaction.response.send_message(
-            "🔒 Você só pode consultar suas próprias advertências.",
-            ephemeral=True
-        )
-
+@app_commands.check(staff_check)
+async def warnings(interaction: discord.Interaction, membro: discord.Member):
     with sqlite3.connect(DB_PATH) as c:
         rows = c.execute(
-            "SELECT reason, moderator_id, created_at FROM warnings "
-            "WHERE guild_id=? AND user_id=? "
-            "ORDER BY id DESC LIMIT 10",
-            (interaction.guild_id, alvo.id)
-        ).fetchall()
-
-    if not rows:
-        return await interaction.response.send_message(
-            f"✅ Nenhuma advertência registrada para {alvo.mention}.",
-            ephemeral=True
-        )
-
-    texto = "\n".join(
-        f"• {data}: {motivo} (moderador <@{mod_id}>)"
-        for motivo, mod_id, data in rows
-    )
-
-    await interaction.response.send_message(
-        embed=embed(f"⚠️ Advertências — {alvo}", texto),
-        ephemeral=True
-    )
- WHERE guild_id=? AND user_id=? "
+            "SELECT reason,moderator_id,created_at FROM warnings WHERE guild_id=? AND user_id=? "
             "ORDER BY id DESC LIMIT 10", (interaction.guild_id, membro.id)
         ).fetchall()
     if not rows:
@@ -1159,7 +1129,8 @@ async def ajuda(interaction: discord.Interaction):
         "`/cupom criar` e `/cupom listar` — Cupons\n"
         "`/ajuda-vendas`, `/anunciar` — Vendas e anúncios\n"
         "`/confi_loja` — Configurar apresentação da loja\n"
-        "`/limpar`, `/limpar_canal`, `/lock`, `/nick` — Moderação\n"
+        "`/adicionar_produto`, `/addestoque`, `/loja`, `/comprar`, `/saldo`, `/adicionar_saldo` — Loja\n"
+        "`/limpar`, `/limpar_canal`, `/lock`, `/nick`, `/desbanir`, `/silenciar`, `/dessilenciar`, `/punicoes` — Moderação\n"
         "`/perfil`, `/rankset` — Perfil e rank\n"
         "`/registrar_venda`, `/rendimentos` — Vendas e rendimentos\n"
         "`/aviso`, `/advertir`, `/advertencias`, `/timeout`, `/expulsar`, `/banir` — Equipe"
@@ -1693,6 +1664,276 @@ async def anunciar(interaction: discord.Interaction, titulo: str, mensagem: str,
     except discord.Forbidden:
         return await interaction.response.send_message("Não tenho permissão para publicar nesse canal.", ephemeral=True)
     await interaction.response.send_message(f"✅ Anúncio publicado em {target.mention}.", ephemeral=True)
+
+
+
+# ═══════════════════════════════════════════════════════════════
+# SISTEMA DE LOJA ADICIONAL — SALDO, PRODUTOS, COMPRAS E PEDIDOS
+# Os saldos e pedidos ficam no SQLite e sobrevivem a reinicializações.
+# ═══════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="adicionar_produto", description="Cadastra um produto na loja.")
+@app_commands.guild_only()
+@app_commands.check(staff_check)
+@app_commands.describe(nome="Nome do produto", preco="Preço em reais", descricao="Descrição",
+                       estoque="Unidades disponíveis", link="Link opcional do produto")
+async def adicionar_produto(
+    interaction: discord.Interaction,
+    nome: str,
+    preco: app_commands.Range[float, 0.01, 100000000],
+    descricao: str = "Sem descrição",
+    estoque: app_commands.Range[int, 0, 1000000] = 0,
+    link: str = ""
+):
+    nome_limpo = nome.strip()
+    if not nome_limpo or len(nome_limpo) > 100:
+        return await interaction.response.send_message("Informe um nome de produto com até 100 caracteres.", ephemeral=True)
+    link_limpo = link.strip()
+    if link_limpo and not (link_limpo.startswith("https://") or link_limpo.startswith("http://")):
+        return await interaction.response.send_message("O link precisa começar com http:// ou https://.", ephemeral=True)
+    try:
+        with sqlite3.connect(DB_PATH) as c:
+            c.execute(
+                "INSERT INTO shop_products(name,description,price,stock,link) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET description=excluded.description, price=excluded.price, "
+                "stock=excluded.stock, link=excluded.link",
+                (nome_limpo, descricao[:1000] or "Sem descrição", float(preco), int(estoque), link_limpo)
+            )
+    except sqlite3.Error:
+        logging.exception("Falha ao cadastrar produto")
+        return await interaction.response.send_message("Não consegui salvar o produto no banco de dados.", ephemeral=True)
+    await interaction.response.send_message(
+        f"✅ Produto **{discord.utils.escape_markdown(nome_limpo)}** cadastrado.\n"
+        f"Preço: **{money(preco)}** • Estoque: **{estoque}** unidade(s).", ephemeral=True
+    )
+
+
+@bot.tree.command(name="loja", description="Mostra os produtos cadastrados na loja.")
+@app_commands.guild_only()
+async def loja(interaction: discord.Interaction):
+    with sqlite3.connect(DB_PATH) as c:
+        rows = c.execute(
+            "SELECT name,description,price,stock,link FROM shop_products ORDER BY name LIMIT 25"
+        ).fetchall()
+    if not rows:
+        return await interaction.response.send_message("🏪 A loja ainda não tem produtos cadastrados.", ephemeral=True)
+    card = embed(f"🛍️ {SHOP_NAME} — Produtos", "Confira os produtos disponíveis abaixo.")
+    for name, description, price, stock, link in rows:
+        stock_text = "Esgotado" if int(stock or 0) <= 0 else f"{stock} unidade(s)"
+        value = f"**Preço:** {money(price)}\n**Estoque:** {stock_text}\n{(description or 'Sem descrição')[:700]}"
+        if link:
+            value += f"\n[Ver produto]({link})"
+        card.add_field(name=str(name)[:256], value=value[:1024], inline=False)
+    card.set_footer(text="Para comprar, use /comprar e informe o nome exato do produto.")
+    await interaction.response.send_message(embed=card, ephemeral=True)
+
+
+@bot.tree.command(name="saldo", description="Consulta seu saldo da loja.")
+@app_commands.guild_only()
+async def saldo(interaction: discord.Interaction):
+    with sqlite3.connect(DB_PATH) as c:
+        row = c.execute(
+            "SELECT balance FROM shop_balances WHERE guild_id=? AND user_id=?",
+            (interaction.guild_id, interaction.user.id)
+        ).fetchone()
+    balance = float(row[0]) if row else 0.0
+    await interaction.response.send_message(f"💰 Seu saldo na **{SHOP_NAME}** é **{money(balance)}**.", ephemeral=True)
+
+
+@bot.tree.command(name="adicionar_saldo", description="Adiciona saldo à carteira de um membro.")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(membro="Membro que receberá o saldo", valor="Valor em reais")
+async def adicionar_saldo(interaction: discord.Interaction, membro: discord.Member,
+                          valor: app_commands.Range[float, 0.01, 100000000]):
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute(
+            "INSERT INTO shop_balances(guild_id,user_id,balance) VALUES(?,?,?) "
+            "ON CONFLICT(guild_id,user_id) DO UPDATE SET balance=balance+excluded.balance",
+            (interaction.guild_id, membro.id, float(valor))
+        )
+        balance = c.execute(
+            "SELECT balance FROM shop_balances WHERE guild_id=? AND user_id=?",
+            (interaction.guild_id, membro.id)
+        ).fetchone()[0]
+    await interaction.response.send_message(
+        f"✅ Adicionado **{money(valor)}** ao saldo de {membro.mention}. Novo saldo: **{money(balance)}**.",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="comprar", description="Compra um produto usando o saldo da loja.")
+@app_commands.guild_only()
+@app_commands.describe(nome="Nome exato do produto cadastrado")
+async def comprar(interaction: discord.Interaction, nome: str):
+    nome_limpo = nome.strip()
+    if not nome_limpo or len(nome_limpo) > 100:
+        return await interaction.response.send_message("Informe um nome de produto com até 100 caracteres.", ephemeral=True)
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute("BEGIN IMMEDIATE")
+        product = c.execute(
+            "SELECT name,price,stock FROM shop_products WHERE name=? COLLATE NOCASE", (nome_limpo,)
+        ).fetchone()
+        if not product:
+            c.rollback()
+            return await interaction.response.send_message("❌ Produto não encontrado. Use /loja para consultar os nomes.", ephemeral=True)
+        product_name, price, stock = product
+        balance_row = c.execute(
+            "SELECT balance FROM shop_balances WHERE guild_id=? AND user_id=?",
+            (interaction.guild_id, interaction.user.id)
+        ).fetchone()
+        balance = float(balance_row[0]) if balance_row else 0.0
+        if int(stock or 0) <= 0:
+            c.rollback()
+            return await interaction.response.send_message("❌ Esse produto está sem estoque. Fale com a equipe da loja.", ephemeral=True)
+        if balance < float(price):
+            c.rollback()
+            return await interaction.response.send_message(
+                f"❌ Saldo insuficiente. Preço: **{money(price)}** • Seu saldo: **{money(balance)}**.", ephemeral=True
+            )
+        c.execute(
+            "UPDATE shop_balances SET balance=balance-? WHERE guild_id=? AND user_id=?",
+            (float(price), interaction.guild_id, interaction.user.id)
+        )
+        c.execute("UPDATE shop_products SET stock=stock-1 WHERE name=? COLLATE NOCASE AND stock>0", (product_name,))
+        c.execute(
+            "INSERT INTO shop_orders(guild_id,user_id,product_name,price,status) VALUES(?,?,?,?, 'Pendente')",
+            (interaction.guild_id, interaction.user.id, product_name, float(price))
+        )
+        order_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+        new_balance = c.execute(
+            "SELECT balance FROM shop_balances WHERE guild_id=? AND user_id=?",
+            (interaction.guild_id, interaction.user.id)
+        ).fetchone()[0]
+    order_channel_id = int(config_value("shop_orders_channel_id", "0") or 0)
+    order_channel = interaction.guild.get_channel(order_channel_id) if order_channel_id else None
+    if isinstance(order_channel, discord.TextChannel):
+        try:
+            await order_channel.send(embed=embed(
+                f"🛒 Novo pedido #{order_id}",
+                f"**Cliente:** {interaction.user.mention} (`{interaction.user.id}`)\n"
+                f"**Produto:** {product_name}\n**Valor:** {money(price)}\n**Status:** Pendente",
+                color=discord.Color.blue()))
+        except discord.HTTPException:
+            logging.exception("Pedido salvo, mas não foi possível avisar o canal de pedidos")
+    await interaction.response.send_message(
+        f"✅ Compra registrada! Pedido **#{order_id}**\nProduto: **{discord.utils.escape_markdown(product_name)}**\n"
+        f"Valor: **{money(price)}**\nSaldo restante: **{money(new_balance)}**\n\nA equipe dará andamento à entrega.",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="avisar", description="Registra uma advertência para um membro.")
+@app_commands.guild_only()
+@app_commands.check(staff_check)
+@app_commands.describe(membro="Membro", motivo="Motivo do aviso")
+async def avisar(interaction: discord.Interaction, membro: discord.Member, motivo: str):
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute(
+            "INSERT INTO warnings(guild_id,user_id,moderator_id,reason) VALUES(?,?,?,?)",
+            (interaction.guild_id, membro.id, interaction.user.id, motivo[:1000])
+        )
+        count = c.execute(
+            "SELECT COUNT(*) FROM warnings WHERE guild_id=? AND user_id=?",
+            (interaction.guild_id, membro.id)
+        ).fetchone()[0]
+    await interaction.response.send_message(
+        f"⚠️ Aviso registrado para {membro.mention}. Total de advertências: **{count}**. Motivo: {motivo[:900]}"
+    )
+
+
+@bot.tree.command(name="punicoes", description="Consulta as advertências de um membro.")
+@app_commands.guild_only()
+@app_commands.check(staff_check)
+@app_commands.describe(membro="Membro para consultar")
+async def punicoes(interaction: discord.Interaction, membro: discord.Member):
+    with sqlite3.connect(DB_PATH) as c:
+        rows = c.execute(
+            "SELECT reason,moderator_id,created_at FROM warnings WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 10",
+            (interaction.guild_id, membro.id)
+        ).fetchall()
+    if not rows:
+        return await interaction.response.send_message(f"✅ {membro.mention} não tem advertências registradas.", ephemeral=True)
+    details = "\n\n".join(
+        f"**{idx}.** {reason}\nPor: <@{moderator_id}> • {created_at}"
+        for idx, (reason, moderator_id, created_at) in enumerate(rows, 1)
+    )
+    await interaction.response.send_message(embed=embed(f"📋 Advertências de {membro.display_name}", details), ephemeral=True)
+
+
+@bot.tree.command(name="desbanir", description="Desbane um usuário usando seu ID do Discord.")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(ban_members=True)
+@app_commands.describe(usuario_id="ID numérico do usuário")
+async def desbanir(interaction: discord.Interaction, usuario_id: str):
+    raw_id = usuario_id.strip()
+    if not raw_id.isdigit():
+        return await interaction.response.send_message("Informe um ID numérico válido.", ephemeral=True)
+    try:
+        await interaction.guild.unban(discord.Object(id=int(raw_id)), reason=f"Desbanido por {interaction.user}")
+    except discord.NotFound:
+        return await interaction.response.send_message("Esse usuário não está banido ou o ID está incorreto.", ephemeral=True)
+    except discord.Forbidden:
+        return await interaction.response.send_message("O bot não tem permissão para desbanir usuários.", ephemeral=True)
+    await interaction.response.send_message(f"✅ Usuário com ID `{raw_id}` foi desbanido.")
+
+
+@bot.tree.command(name="silenciar", description="Aplica timeout temporário em um membro.")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(moderate_members=True)
+@app_commands.describe(membro="Membro", minutos="Duração em minutos", motivo="Motivo")
+async def silenciar(interaction: discord.Interaction, membro: discord.Member,
+                    minutos: app_commands.Range[int, 1, 40320], motivo: str = "Não informado"):
+    if membro.id == interaction.user.id:
+        return await interaction.response.send_message("Você não pode silenciar a si mesmo.", ephemeral=True)
+    if interaction.guild.owner_id != interaction.user.id and membro.top_role >= interaction.user.top_role:
+        return await interaction.response.send_message("O cargo desse membro é igual ou superior ao seu.", ephemeral=True)
+    try:
+        await membro.timeout(timedelta(minutes=int(minutos)), reason=motivo[:500])
+    except discord.Forbidden:
+        return await interaction.response.send_message("Não tenho permissão ou cargo suficiente para aplicar timeout.", ephemeral=True)
+    await interaction.response.send_message(f"🔇 {membro.mention} recebeu timeout por **{minutos} minuto(s)**. Motivo: {motivo[:800]}")
+
+
+@bot.tree.command(name="dessilenciar", description="Remove o timeout de um membro.")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(moderate_members=True)
+@app_commands.describe(membro="Membro")
+async def dessilenciar(interaction: discord.Interaction, membro: discord.Member):
+    try:
+        await membro.timeout(None, reason=f"Timeout removido por {interaction.user}")
+    except discord.Forbidden:
+        return await interaction.response.send_message("Não tenho permissão ou cargo suficiente para remover o timeout.", ephemeral=True)
+    await interaction.response.send_message(f"🔊 Timeout removido de {membro.mention}.")
+
+
+@bot.tree.command(name="ticket", description="Abre um ticket de atendimento.")
+@app_commands.guild_only()
+@app_commands.describe(motivo="Motivo do atendimento")
+async def ticket(interaction: discord.Interaction, motivo: str = "Atendimento geral"):
+    await create_ticket(interaction, "Atendimento", motivo)
+
+
+@bot.tree.command(name="fechar", description="Fecha o ticket atual.")
+@app_commands.guild_only()
+async def fechar(interaction: discord.Interaction):
+    channel = interaction.channel
+    if not isinstance(channel, discord.TextChannel):
+        return await interaction.response.send_message("Use este comando em um canal de texto.", ephemeral=True)
+    with sqlite3.connect(DB_PATH) as c:
+        row = c.execute("SELECT opener_id,status FROM tickets WHERE channel_id=?", (channel.id,)).fetchone()
+        if not row or row[1] != "open":
+            return await interaction.response.send_message("Este canal não é um ticket aberto registrado.", ephemeral=True)
+        if interaction.user.id != row[0] and not staff(interaction):
+            return await interaction.response.send_message("Só quem abriu o ticket ou a equipe pode fechá-lo.", ephemeral=True)
+        c.execute("UPDATE tickets SET status='closed',closed_by=?,closed_at=CURRENT_TIMESTAMP WHERE channel_id=?",
+                  (interaction.user.id, channel.id))
+    await interaction.response.send_message("🔒 Ticket fechado. O canal ficará arquivado.")
+    try:
+        await channel.edit(name=("fechado-" + channel.name)[:100])
+        await channel.set_permissions(interaction.guild.default_role, view_channel=False)
+    except discord.HTTPException:
+        logging.exception("Não foi possível arquivar o canal do ticket")
 
 
 if __name__ == "__main__":
