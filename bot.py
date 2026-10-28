@@ -1038,14 +1038,52 @@ async def warn(interaction: discord.Interaction, membro: discord.Member, motivo:
     )
 
 
-@bot.tree.command(name="advertencias", description="Consulta advertências de membro.")
-@app_commands.describe(membro="Membro")
+
+@bot.tree.command(
+    name="advertencias",
+    description="Consulta suas advertências ou as de outro membro."
+)
 @app_commands.guild_only()
-@app_commands.check(staff_check)
-async def warnings(interaction: discord.Interaction, membro: discord.Member):
+@app_commands.describe(
+    membro="Opcional: membro que deseja consultar (somente equipe)"
+)
+async def warnings(
+    interaction: discord.Interaction,
+    membro: discord.Member = None
+):
+    alvo = membro or interaction.user
+
+    # Membros comuns só podem consultar as próprias advertências.
+    if not staff(interaction) and alvo.id != interaction.user.id:
+        return await interaction.response.send_message(
+            "🔒 Você só pode consultar suas próprias advertências.",
+            ephemeral=True
+        )
+
     with sqlite3.connect(DB_PATH) as c:
         rows = c.execute(
-            "SELECT reason,moderator_id,created_at FROM warnings WHERE guild_id=? AND user_id=? "
+            "SELECT reason, moderator_id, created_at FROM warnings "
+            "WHERE guild_id=? AND user_id=? "
+            "ORDER BY id DESC LIMIT 10",
+            (interaction.guild_id, alvo.id)
+        ).fetchall()
+
+    if not rows:
+        return await interaction.response.send_message(
+            f"✅ Nenhuma advertência registrada para {alvo.mention}.",
+            ephemeral=True
+        )
+
+    texto = "\n".join(
+        f"• {data}: {motivo} (moderador <@{mod_id}>)"
+        for motivo, mod_id, data in rows
+    )
+
+    await interaction.response.send_message(
+        embed=embed(f"⚠️ Advertências — {alvo}", texto),
+        ephemeral=True
+    )
+ WHERE guild_id=? AND user_id=? "
             "ORDER BY id DESC LIMIT 10", (interaction.guild_id, membro.id)
         ).fetchall()
     if not rows:
