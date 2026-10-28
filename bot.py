@@ -201,7 +201,24 @@ async def ban(i:discord.Interaction,membro:discord.Member,motivo:str):
         await membro.ban(reason=motivo[:500]); await i.response.send_message(f"🔨 {membro} foi banido. Motivo: {motivo}")
     except discord.Forbidden: await i.response.send_message("Sem permissão para banir.",ephemeral=True)
 
-@bot.tree.error
+@bot.tree.error @bot.tree.command(name="ping", description="Ver latência do bot")
+async def ping(interaction: discord.Interaction):
+    ms = round(bot.latency * 1000)
+    await interaction.response.send_message(
+        f"🏓 Pong! Latência: {ms} ms"
+    )
+
+
+@bot.tree.command(name="ajuda", description="Ver os comandos do bot")
+async def ajuda(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "🤖 **ZORDX STORE BOT**\n"
+        "`/ping` — Latência\n"
+        "`/ajuda` — Lista de comandos\n"
+        "`/produtos` — Ver produtos\n"
+        "`/painel_tickets` — Painel de tickets",
+        ephemeral=True
+    )
 async def command_error(i,error):
     logging.error("Erro de comando: %r",error)
     msg="Não foi possível executar. Confira as permissões e tente novamente."
