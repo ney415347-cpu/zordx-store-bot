@@ -201,7 +201,7 @@ async def ban(i:discord.Interaction,membro:discord.Member,motivo:str):
         await membro.ban(reason=motivo[:500]); await i.response.send_message(f"🔨 {membro} foi banido. Motivo: {motivo}")
     except discord.Forbidden: await i.response.send_message("Sem permissão para banir.",ephemeral=True)
 
-@bot.tree.error @bot.tree.command(name="ping", description="Ver latência do bot")
+@bot.tree.error
 async def ping(interaction: discord.Interaction):
     ms = round(bot.latency * 1000)
     await interaction.response.send_message(
