@@ -1680,7 +1680,7 @@ async def anunciar(interaction: discord.Interaction, titulo: str, mensagem: str,
 async def adicionar_produto(
     interaction: discord.Interaction,
     nome: str,
-    preco: app_commands.Range[float, 0.01, 100000000],
+    preco: app_commands.Range[float, 0.01, 100000000.0],
     descricao: str = "Sem descrição",
     estoque: app_commands.Range[int, 0, 1000000] = 0,
     link: str = ""
