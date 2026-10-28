@@ -149,7 +149,7 @@ def save_config(key, value):
 
 
 # ═══════════════════════════════════════════════════════════════
-#                    🎫 EMBEDS DO SISTEMA DE TICKETS — ADICIONADO
+#                    🎫 EMBEDS DO SISTEMA DE TICKETS
 # ═══════════════════════════════════════════════════════════════
 def embed_ticket_config(atendente="ninguém", estado="Aberto", descanso="normal"):
     return discord.Embed(
@@ -181,7 +181,7 @@ def embed_ticket_config(atendente="ninguém", estado="Aberto", descanso="normal"
 
 
 # ═══════════════════════════════════════════════════════════════
-#                    📋 MENU DE AÇÕES DO TICKET — ADICIONADO
+#                    📋 MENU DE AÇÕES DO TICKET
 # ═══════════════════════════════════════════════════════════════
 class MenuAcoesTicket(discord.ui.View):
     def __init__(self):
@@ -218,7 +218,7 @@ class MenuAcoesTicket(discord.ui.View):
 
 
 # ═══════════════════════════════════════════════════════════════
-#                    🎨 CRIADOR DE EMBEDS — FUNÇÕES ADICIONADAS
+#                    🎨 EMBEDS DO CRIADOR DE EMBEDS
 # ═══════════════════════════════════════════════════════════════
 def embed_painel_embeds():
     return discord.Embed(
@@ -288,7 +288,7 @@ def embed_form_botao_link():
 
 
 # ═══════════════════════════════════════════════════════════════
-#                    🔘 BOTÕES DO CRIADOR DE EMBEDS — ADICIONADO
+#                    🔘 BOTÕES DO CRIADOR DE EMBEDS
 # ═══════════════════════════════════════════════════════════════
 class BotoesCriarEmbed(discord.ui.View):
     def __init__(self):
@@ -303,7 +303,4 @@ class BotoesCriarEmbed(discord.ui.View):
         await interaction.response.send_message("⚡ Gerando embed com IA...", ephemeral=True)
 
     @discord.ui.button(label="Adicionar Botão", style=discord.ButtonStyle.gray, emoji="🔗", row=1)
-    async def add_botao(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(embed=embed_form_botao_link(), ephemeral=True)
-
-    @discord.ui.button(label="Título", style=disc
+    async def add_botao(self, interaction: discord.Interaction, button: discord.ui.Button
