@@ -863,39 +863,117 @@ async def open_ticket_setting(interaction: discord.Interaction, guild_id: int, v
     if value == 'limit':
         return await interaction.response.send_modal(TicketLimitModal(guild_id))
 
+def ticket_home_embed():
+    return status_embed(
+        '⚙️ Configuração de Tickets',
+        'Selecione abaixo a opção que deseja configurar ou acessar.',
+        success=True
+    )
+
+
+class TicketHomeSelect(discord.ui.Select):
+    def __init__(self, guild_id: int):
+        self.guild_id = guild_id
+        options = [
+            discord.SelectOption(label='Painéis de Ticket', value='panels', emoji='🎫', description='Gerencie as opções dos painéis de tickets.'),
+            discord.SelectOption(label='Configurações', value='settings', emoji='⚙️', description='Acesse as configurações gerais do sistema.'),
+            discord.SelectOption(label='Enviar Painel', value='publish', emoji='📨', description='Publique o painel em um canal do servidor.'),
+        ]
+        super().__init__(placeholder='Escolha uma opção...', min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        if choice == 'panels':
+            return await interaction.response.edit_message(
+                embed=status_embed('🎫 Painéis de Ticket', 'Selecione uma configuração no menu abaixo. Use **Avançar** para ver as demais opções.', success=True),
+                view=TicketSetupView(self.guild_id, page=0)
+            )
+        if choice == 'settings':
+            return await interaction.response.edit_message(
+                embed=status_embed('⚙️ Configurações', 'Acesse as configurações gerais do sistema de tickets.', success=True),
+                view=GeneralSettingsView(self.guild_id)
+            )
+        return await interaction.response.edit_message(
+            embed=status_embed('📨 Enviar Painel', 'Escolha o canal onde deseja publicar o painel de abertura de tickets.', success=True),
+            view=TicketPublishView(self.guild_id)
+        )
+
+
 class TicketHomeView(discord.ui.View):
-    """Menu principal das configurações, no padrão visual aprovado."""
+    """Tela inicial com um único menu suspenso de três opções."""
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.add_item(TicketHomeSelect(guild_id))
+
+
+class TicketSetupSelect(discord.ui.Select):
+    SETTINGS = [
+        ('role', 'Cargos de Suporte', '👥', 'Defina quem pode atender os tickets.'),
+        ('category', 'Categoria dos Tickets', '📁', 'Escolha onde os tickets serão criados.'),
+        ('logs', 'Canal de Logs', '📋', 'Escolha onde os registros serão enviados.'),
+        ('evaluation', 'Canal de Avaliação', '⭐', 'Escolha onde as avaliações serão publicadas.'),
+        ('name', 'Nome do Canal', '✏️', 'Defina o padrão do nome dos tickets.'),
+        ('type', 'Tipo de Canal', '📌', 'Defina o tipo de canal dos tickets.'),
+        ('image', 'Imagem ao Abrir', '🖼️', 'Configure a imagem de abertura.'),
+        ('limit', 'Limite por Usuário', '👤', 'Defina quantos tickets cada pessoa pode abrir.'),
+    ]
+
+    def __init__(self, guild_id: int, page: int):
+        self.guild_id = guild_id
+        self.page = page
+        selected = self.SETTINGS[page * 4:(page + 1) * 4]
+        options = [discord.SelectOption(label=label, value=value, emoji=emoji, description=description)
+                   for value, label, emoji, description in selected]
+        super().__init__(placeholder='Escolha uma opção...', min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        await open_ticket_setting(interaction, self.guild_id, self.values[0])
+
+
+class TicketSetupView(discord.ui.View):
+    """Menu de oito configurações, dividido em duas páginas com navegação."""
+    def __init__(self, guild_id: int, page: int = 0):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.page = max(0, min(1, page))
+        self.add_item(TicketSetupSelect(guild_id, self.page))
+        for item in self.children:
+            if isinstance(item, discord.ui.Button) and item.label == 'Página anterior':
+                item.disabled = (self.page == 0)
+            elif isinstance(item, discord.ui.Button) and item.label == 'Avançar':
+                item.disabled = (self.page == 1)
+
+    @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=ticket_home_embed(), view=TicketHomeView(self.guild_id))
+
+    @discord.ui.button(label='Página anterior', emoji='⬅️', style=discord.ButtonStyle.secondary, row=1)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=status_embed('🎫 Painéis de Ticket • Página 1/2', 'Selecione uma das configurações abaixo. Use **Avançar** para ver as demais opções.', success=True),
+            view=TicketSetupView(self.guild_id, page=0)
+        )
+
+    @discord.ui.button(label='Avançar', emoji='➡️', style=discord.ButtonStyle.primary, row=1)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=status_embed('🎫 Painéis de Ticket • Página 2/2', 'Selecione uma das configurações abaixo. Use **Página anterior** para retornar.', success=True),
+            view=TicketSetupView(self.guild_id, page=1)
+        )
+
+
+class TicketSetupSubView(discord.ui.View):
     def __init__(self, guild_id: int):
         super().__init__(timeout=300)
         self.guild_id = guild_id
 
-    @discord.ui.button(label='Painéis de Ticket', emoji='🧩', style=discord.ButtonStyle.primary, row=0)
-    async def ticket_panels(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(embed=status_embed('🧩 | Painéis de Ticket', 'Escolha uma opção para configurar os painéis de tickets. Todas as opções ficam neste menu.', success=True), view=TicketSetupView(self.guild_id))
-
-    @discord.ui.button(label='Configurações Gerais', emoji='🔧', style=discord.ButtonStyle.secondary, row=0)
-    async def general_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(embed=status_embed('🔧 | Configurações Gerais', 'Personalize os recursos gerais da ZORDX STORE BOT.', success=True), view=GeneralSettingsView(self.guild_id))
-
-    @discord.ui.button(label='Atendimento', emoji='👥', style=discord.ButtonStyle.secondary, row=1)
-    async def atendimento(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(embed=status_embed('👥 | Atendimento', 'Ajuste os cargos, categoria, logs e avaliações do atendimento.', success=True), view=TicketSetupView(self.guild_id))
-
-    @discord.ui.button(label='Atendimento por Horário', emoji='🕒', style=discord.ButtonStyle.secondary, row=1)
-    async def schedule(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(embed=schedule_embed(self.guild_id), view=ScheduleSettingsView(self.guild_id))
-
-    @discord.ui.button(label='Inteligência Artificial', emoji='🤖', style=discord.ButtonStyle.secondary, row=2)
-    async def ai(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(embed=ai_embed(self.guild_id), view=AISettingsView(self.guild_id))
-
-    @discord.ui.button(label='Global', emoji='🌐', style=discord.ButtonStyle.secondary, row=2)
-    async def global_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(embed=global_embed(self.guild_id), view=GlobalSettingsView(self.guild_id))
-
-    @discord.ui.button(label='Enviar Painel', emoji='📨', style=discord.ButtonStyle.success, row=3)
-    async def publish_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(embed=status_embed('📨 | Enviar Painel', 'Escolha o canal onde deseja publicar o painel de abertura de tickets.'), view=TicketPublishView(self.guild_id))
+    @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=status_embed('🎫 Painéis de Ticket', 'Selecione uma configuração no menu abaixo.', success=True),
+            view=TicketSetupView(self.guild_id, page=0)
+        )
 
 
 def schedule_embed(guild_id):
@@ -930,7 +1008,7 @@ class GeneralSettingsView(discord.ui.View):
         await interaction.response.edit_message(embed=global_embed(self.guild_id), view=GlobalSettingsView(self.guild_id))
     @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.secondary, row=2)
     async def back(self, interaction, button):
-        await interaction.response.edit_message(embed=status_embed('🎫 | Sistema de Tickets', 'Escolha uma área para configurar a ZORDX STORE BOT.'), view=TicketHomeView(self.guild_id))
+        await interaction.response.edit_message(embed=ticket_home_embed(), view=TicketHomeView(self.guild_id))
 
 
 class ScheduleModal(discord.ui.Modal, title='Horários de atendimento'):
@@ -1027,76 +1105,8 @@ class TicketGeneralView(discord.ui.View):
     @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.secondary, row=1)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=status_embed('🎫 | Sistema de Tickets', 'Bem-vindo ao painel de configuração da ZORDX STORE BOT.\n\n**Painéis de Ticket** — cargos, categoria, logs, avaliações, nome, tipo, imagem e limite.\n**Configurações Gerais** — atendimento, horários, inteligência artificial e opções globais.\n**Enviar Painel** — publique o painel de abertura em um canal.', success=True),
+            embed=ticket_home_embed(),
             view=TicketHomeView(self.guild_id)
-        )
-
-class TicketSetupView(discord.ui.View):
-    """Menu visual de Configurações de Tickets; todas as opções ficam na mesma mensagem."""
-    def __init__(self, guild_id: int):
-        super().__init__(timeout=300)
-        self.guild_id = guild_id
-
-    @discord.ui.button(label='Cargos de Suporte', emoji='👥', style=discord.ButtonStyle.secondary, row=0)
-    async def roles(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_ticket_setting(interaction, self.guild_id, 'role')
-
-    @discord.ui.button(label='Categoria dos Tickets', emoji='📁', style=discord.ButtonStyle.secondary, row=0)
-    async def category(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_ticket_setting(interaction, self.guild_id, 'category')
-
-    @discord.ui.button(label='Canal de Logs', emoji='📋', style=discord.ButtonStyle.secondary, row=1)
-    async def logs(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_ticket_setting(interaction, self.guild_id, 'logs')
-
-    @discord.ui.button(label='Canal de Avaliação', emoji='⭐', style=discord.ButtonStyle.secondary, row=1)
-    async def evaluation(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_ticket_setting(interaction, self.guild_id, 'evaluation')
-
-    @discord.ui.button(label='Nome do Canal', emoji='✏️', style=discord.ButtonStyle.secondary, row=2)
-    async def name(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_ticket_setting(interaction, self.guild_id, 'name')
-
-    @discord.ui.button(label='Tipo de Canal', emoji='📌', style=discord.ButtonStyle.secondary, row=2)
-    async def channel_type(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_ticket_setting(interaction, self.guild_id, 'type')
-
-    @discord.ui.button(label='Imagem ao Abrir', emoji='🖼️', style=discord.ButtonStyle.secondary, row=3)
-    async def image(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_ticket_setting(interaction, self.guild_id, 'image')
-
-    @discord.ui.button(label='Limite por Usuário', emoji='👤', style=discord.ButtonStyle.secondary, row=3)
-    async def limit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await open_ticket_setting(interaction, self.guild_id, 'limit')
-
-    @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.primary, row=4)
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            embed=status_embed('🎫 | Sistema de Tickets', 'Bem-vindo ao painel de configuração da ZORDX STORE BOT.\n\n**Painéis de Ticket** — cargos, categoria, logs, avaliações, nome, tipo, imagem e limite.\n**Configurações Gerais** — atendimento, horários, inteligência artificial e opções globais.\n**Enviar Painel** — publique o painel de abertura em um canal.', success=True),
-            view=TicketHomeView(self.guild_id)
-        )
-
-class TicketSetupSubView(discord.ui.View):
-    """Mantém cada configuração no mesmo painel e oferece retorno ao menu Atendimento."""
-    def __init__(self, guild_id: int):
-        super().__init__(timeout=300)
-        self.guild_id = guild_id
-
-    @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.secondary, row=1)
-    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(
-            embed=status_embed(
-                '🎫 Atendimento — Configurações',
-                'Escolha uma opção para configurar.\n\n'
-                '• Cargos de Suporte\n'
-                '• Categoria dos Tickets\n'
-                '• Canal de Logs\n'
-                '• Canal de Avaliação\n'
-                '• Nome do Canal\n'
-                '• Tipo de Canal\n'
-                '• Imagem ao Abrir\n'
-                '• Limite por Usuário'            ),
-            view=TicketSetupView(self.guild_id)
         )
 
 class TicketEvaluationChannelSelect(discord.ui.ChannelSelect):
@@ -1215,20 +1225,7 @@ async def config_ticket(interaction: discord.Interaction):
     guild = interaction.guild
     if guild is None:
         return await interaction.response.send_message(embed=status_embed('ZORDX STORE', 'Use este comando dentro do servidor.'), ephemeral=True)
-    category_id = int(cfg(guild.id, 'ticket_category_id', '0') or 0)
-    role_id = int(cfg(guild.id, 'ticket_support_role_id', '0') or 0)
-    role_ids = ticket_role_ids(guild.id)
-    logs_id = int(cfg(guild.id, 'ticket_logs_channel_id', '0') or 0)
-    category = guild.get_channel(category_id) if category_id else None
-    role = guild.get_role(role_id) if role_id else None
-    logs = guild.get_channel(logs_id) if logs_id else None
-    evaluation_id = int(cfg(guild.id, 'ticket_evaluation_channel_id', '0') or 0)
-    evaluation_channel = guild.get_channel(evaluation_id) if evaluation_id else None
-    embed = status_embed('🎫 | Sistema de Tickets', 'Bem-vindo ao painel de configuração da ZORDX STORE BOT.\n\n**Painéis de Ticket** — cargos, categoria, logs, avaliações, nome, tipo, imagem e limite.\n**Configurações Gerais** — atendimento, horários, inteligência artificial e opções globais.\n**Enviar Painel** — publique o painel de abertura em um canal.', success=True)
-    role_mentions = ', '.join(guild.get_role(rid).mention for rid in role_ids if guild.get_role(rid)) or (role.mention if role else 'Não configurado')
-    embed.add_field(name='📌 Estado atual', value=f"**Categoria:** {category.name if isinstance(category, discord.CategoryChannel) else 'Não configurada'}\n**Cargos de atendimento:** {role_mentions}\n**Canal de logs:** {logs.mention if isinstance(logs, discord.TextChannel) else 'Não configurado'}\n**Canal de avaliação:** {evaluation_channel.mention if isinstance(evaluation_channel, discord.TextChannel) else 'Usa o canal de logs'}\n**Formato do nome:** `{cfg(guild.id, 'ticket_name_format', 'ticket-{assunto}-{usuario}')}`\n**Imagem ao abrir:** {'Configurada' if cfg(guild.id, 'ticket_opening_image', '') else 'Não configurada'}\n**Limite por pessoa:** {cfg(guild.id, 'ticket_open_limit', '1')}", inline=False)
-    embed.set_footer(text=f'{SHOP_NAME} • Painel administrativo • Só você pode ver esta mensagem')
-    await interaction.response.send_message(embed=embed, view=TicketHomeView(guild.id), ephemeral=True)
+    await interaction.response.send_message(embed=ticket_home_embed(), view=TicketHomeView(guild.id), ephemeral=True)
 
 @bot.tree.command(name='saldo', description='Consultar seu saldo disponível para saque')
 async def saldo(interaction: discord.Interaction):
