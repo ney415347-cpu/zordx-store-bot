@@ -1204,8 +1204,13 @@ class TicketPublishChannelSelect(discord.ui.ChannelSelect):
 
     async def callback(self, interaction: discord.Interaction):
         channel = self.values[0]
-        # Abre uma resposta privada de processamento; evita expirar a interação enquanto publica.
-        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        # Atualiza imediatamente o menu original para não deixar a interação travada.
+        await interaction.response.edit_message(
+            embed=status_embed('⏳ Publicando painel...', f'Estou enviando o painel para {channel.mention}. Aguarde.'),
+            view=None
+        )
+
         try:
             title = cfg(self.guild_id, 'ticket_panel_title', '🎫 Central de Atendimento')
             description = cfg(self.guild_id, 'ticket_panel_description', 'Precisa de ajuda? Clique no botão abaixo para abrir um ticket privado com a equipe.')
@@ -1228,8 +1233,7 @@ class TicketPublishChannelSelect(discord.ui.ChannelSelect):
         try:
             await interaction.edit_original_response(embed=result, view=TicketHomeView(self.guild_id))
         except discord.HTTPException:
-            # Se a edição da resposta privada falhar, entrega o resultado como mensagem privada.
-            await interaction.followup.send(embed=result, ephemeral=True)
+            logging.exception('Não foi possível atualizar a confirmação da publicação do painel')
 
 @bot.tree.command(name='config-ticket', description='Abrir painel interativo de configuração de tickets')
 @staff_only()
