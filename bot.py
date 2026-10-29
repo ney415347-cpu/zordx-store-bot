@@ -846,7 +846,7 @@ class TicketSetupView(discord.ui.View):
 
     @discord.ui.button(label='Publicar painel', style=discord.ButtonStyle.success, emoji='📨', row=2)
     async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(embed=status_embed('📨 Publicar painel', 'Escolha o canal usando o menu abaixo.', success=True), view=TicketPublishView(self.guild_id), ephemeral=True)
+        await interaction.response.edit_message(embed=status_embed('📨 Publicar painel', 'Escolha o canal usando o menu abaixo.'), view=TicketPublishView(self.guild_id))
 
 class TicketSetupSelect(discord.ui.Select):
     def __init__(self, guild_id: int):
@@ -860,17 +860,15 @@ class TicketSetupSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         value = self.values[0]
-        if value == 'category':
-            view = discord.ui.View(timeout=180)
-            view.add_item(TicketCategorySelect(self.guild_id))
-            return await interaction.response.send_message(embed=status_embed('📁 Categoria dos tickets', 'Selecione a categoria onde os tickets serão criados.'), view=view, ephemeral=True)
-        if value == 'role':
-            view = discord.ui.View(timeout=180)
-            view.add_item(TicketRoleSelect(self.guild_id))
-            return await interaction.response.send_message(embed=status_embed('👥 Cargo de suporte', 'Selecione o cargo que terá acesso aos tickets.'), view=view, ephemeral=True)
         view = discord.ui.View(timeout=180)
+        if value == 'category':
+            view.add_item(TicketCategorySelect(self.guild_id))
+            return await interaction.response.edit_message(embed=status_embed('📁 Categoria dos tickets', 'Selecione a categoria onde os tickets serão criados.'), view=view)
+        if value == 'role':
+            view.add_item(TicketRoleSelect(self.guild_id))
+            return await interaction.response.edit_message(embed=status_embed('👥 Cargos de atendimento', 'Selecione todos os cargos autorizados a atender tickets.'), view=view)
         view.add_item(TicketLogsSelect(self.guild_id))
-        await interaction.response.send_message(embed=status_embed('📋 Canal de logs', 'Selecione o canal para registrar os tickets.'), view=view, ephemeral=True)
+        await interaction.response.edit_message(embed=status_embed('📋 Canal de logs', 'Selecione o canal para registrar abertura e fechamento dos tickets.'), view=view)
 
 class TicketCategorySelect(discord.ui.ChannelSelect):
     def __init__(self, guild_id):
@@ -878,7 +876,7 @@ class TicketCategorySelect(discord.ui.ChannelSelect):
         super().__init__(placeholder='Selecione a categoria', channel_types=[discord.ChannelType.category], min_values=1, max_values=1)
     async def callback(self, interaction):
         set_cfg(self.guild_id, 'ticket_category_id', self.values[0].id)
-        await interaction.response.send_message(embed=status_embed('✅ Categoria salva', f'Categoria definida para **{self.values[0].name}**.', success=True), ephemeral=True)
+        await interaction.response.edit_message(embed=status_embed('✅ Categoria salva', f'Categoria definida para **{self.values[0].name}**.', success=True), view=TicketSetupView(self.guild_id))
 
 class TicketRoleSelect(discord.ui.RoleSelect):
     def __init__(self, guild_id):
@@ -890,7 +888,7 @@ class TicketRoleSelect(discord.ui.RoleSelect):
         # Mantém compatibilidade com versões antigas do bot.
         set_cfg(self.guild_id, 'ticket_support_role_id', roles[0].id)
         mentions = ', '.join(role.mention for role in roles)
-        await interaction.response.send_message(embed=status_embed('✅ Cargos de atendimento salvos', f'Cargos autorizados: {mentions}', success=True), ephemeral=True)
+        await interaction.response.edit_message(embed=status_embed('✅ Cargos de atendimento salvos', f'Cargos autorizados: {mentions}', success=True), view=TicketSetupView(self.guild_id))
 
 class TicketLogsSelect(discord.ui.ChannelSelect):
     def __init__(self, guild_id):
@@ -898,7 +896,7 @@ class TicketLogsSelect(discord.ui.ChannelSelect):
         super().__init__(placeholder='Selecione o canal de logs', channel_types=[discord.ChannelType.text], min_values=1, max_values=1)
     async def callback(self, interaction):
         set_cfg(self.guild_id, 'ticket_logs_channel_id', self.values[0].id)
-        await interaction.response.send_message(embed=status_embed('✅ Canal de logs salvo', f'Logs serão enviados em {self.values[0].mention}.', success=True), ephemeral=True)
+        await interaction.response.edit_message(embed=status_embed('✅ Canal de logs salvo', f'Logs serão enviados em {self.values[0].mention}.', success=True), view=TicketSetupView(self.guild_id))
 
 class TicketPublishView(discord.ui.View):
     def __init__(self, guild_id):
@@ -922,8 +920,8 @@ class TicketPublishChannelSelect(discord.ui.ChannelSelect):
         try:
             await channel.send(embed=embed, view=TicketPanelView())
         except (discord.Forbidden, discord.HTTPException):
-            return await interaction.response.send_message(embed=status_embed('❌ Não foi possível publicar', 'Confira as permissões do bot no canal escolhido.', success=False), ephemeral=True)
-        await interaction.response.send_message(embed=status_embed('✅ Painel publicado', f'O painel de tickets foi publicado em {channel.mention}.', success=True), ephemeral=True)
+            return await interaction.response.edit_message(embed=status_embed('❌ Não foi possível publicar', 'Confira as permissões do bot no canal escolhido.', success=False), view=TicketSetupView(self.guild_id))
+        await interaction.response.edit_message(embed=status_embed('✅ Painel publicado', f'O painel de tickets foi publicado em {channel.mention}.', success=True), view=TicketSetupView(self.guild_id))
 
 @bot.tree.command(name='config-ticket', description='Abrir painel interativo de configuração de tickets')
 @staff_only()
