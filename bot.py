@@ -1241,7 +1241,19 @@ async def config_ticket(interaction: discord.Interaction):
     guild = interaction.guild
     if guild is None:
         return await interaction.response.send_message(embed=status_embed('ZORDX STORE', 'Use este comando dentro do servidor.'), ephemeral=True)
-    await interaction.response.send_message(embed=ticket_home_embed(), view=TicketHomeView(guild.id), ephemeral=True)
+    # Evita o erro 40060 caso algum fluxo já tenha reconhecido a interação.
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            embed=ticket_home_embed(),
+            view=TicketHomeView(guild.id),
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            embed=ticket_home_embed(),
+            view=TicketHomeView(guild.id),
+            ephemeral=True
+        )
 
 @bot.tree.command(name='saldo', description='Consultar seu saldo disponível para saque')
 async def saldo(interaction: discord.Interaction):
