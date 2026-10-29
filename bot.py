@@ -375,7 +375,9 @@ class TicketRatingView(discord.ui.View):
                     return await interaction.response.send_message(embed=status_embed('Avaliação privada', 'Somente quem abriu o ticket pode avaliar.'), ephemeral=True)
                 with db() as c:
                     c.execute('INSERT INTO zordx_ticket_ratings(guild_id,ticket_id,user_id,rating) VALUES(?,?,?,?)', (self.guild_id, self.ticket_id, self.owner_id, value))
-                log_id = int(cfg(self.guild_id, 'ticket_logs_channel_id', '0') or 0)
+                log_id = int(cfg(self.guild_id, 'ticket_evaluation_channel_id', '0') or 0)
+                if not log_id:
+                    log_id = int(cfg(self.guild_id, 'ticket_logs_channel_id', '0') or 0)
                 guild = bot.get_guild(self.guild_id)
                 channel = guild.get_channel(log_id) if guild and log_id else None
                 if isinstance(channel, discord.TextChannel):
@@ -548,9 +550,12 @@ class TicketSubjectSelect(discord.ui.Select):
 
         base = ''.join(ch.lower() if ch.isalnum() else '-' for ch in interaction.user.name).strip('-')[:30] or 'usuario'
         slug = ''.join(ch.lower() if ch.isalnum() else '-' for ch in subject).strip('-')[:18]
+        name_format = cfg(guild.id, 'ticket_name_format', 'ticket-{assunto}-{usuario}')
+        channel_name = name_format.replace('{usuario}', base).replace('{assunto}', slug)
+        channel_name = '-'.join(part for part in channel_name.split('-') if part)[:100] or f'ticket-{base}'
         try:
             channel = await guild.create_text_channel(
-                name=f'ticket-{slug}-{base}'[:100], category=category, overwrites=overwrites,
+                name=channel_name, category=category, overwrites=overwrites,
                 topic=f'Ticket de {interaction.user} ({interaction.user.id}) | Assunto: {subject}',
                 reason=f'Ticket aberto por {interaction.user} | Assunto: {subject}')
             with db() as c:
@@ -563,6 +568,9 @@ class TicketSubjectSelect(discord.ui.Select):
                 'Envie os detalhes necessários e aguarde a equipe.'), color=color_from(DEFAULT_COLOR))
             embed.add_field(name='🔒 Privacidade', value='Este canal é visível apenas para você, a equipe autorizada e o bot.', inline=False)
             embed.set_footer(text=f'{SHOP_NAME} • Sistema de tickets')
+            opening_image = cfg(guild.id, 'ticket_opening_image', '')
+            if opening_image.startswith(('https://', 'http://')):
+                embed.set_image(url=opening_image)
             support_text = ' '.join(role.mention for role in support_roles) or 'Equipe de suporte'
             await channel.send(content=f'{interaction.user.mention} • {support_text}', embed=embed, view=TicketCloseView())
 
@@ -830,45 +838,148 @@ class TicketLimitModal(discord.ui.Modal):
         set_cfg(self.guild_id, 'ticket_open_limit', value)
         await interaction.response.send_message(embed=status_embed('✅ Limite atualizado', f'Cada pessoa poderá ter até **{value}** ticket(s) aberto(s).', success=True), ephemeral=True)
 
+async def open_ticket_setting(interaction: discord.Interaction, guild_id: int, value: str):
+    view = TicketSetupSubView(guild_id)
+    if value == 'category':
+        view.add_item(TicketCategorySelect(guild_id))
+        return await interaction.response.edit_message(embed=status_embed('📁 Categoria dos tickets', 'Selecione a categoria onde os tickets serão criados.'), view=view)
+    if value == 'role':
+        view.add_item(TicketRoleSelect(guild_id))
+        return await interaction.response.edit_message(embed=status_embed('👥 Cargos de suporte', 'Selecione todos os cargos autorizados a atender tickets.'), view=view)
+    if value == 'logs':
+        view.add_item(TicketLogsSelect(guild_id))
+        return await interaction.response.edit_message(embed=status_embed('📋 Canal de logs', 'Selecione o canal para registrar abertura e fechamento dos tickets.'), view=view)
+    if value == 'evaluation':
+        view.add_item(TicketEvaluationChannelSelect(guild_id))
+        return await interaction.response.edit_message(embed=status_embed('⭐ Canal de avaliação', 'Selecione o canal onde as avaliações serão publicadas.'), view=view)
+    if value == 'name':
+        view.add_item(TicketNameFormatSelect(guild_id))
+        return await interaction.response.edit_message(embed=status_embed('✏️ Nome do canal', 'Escolha o formato do nome dos novos tickets.'), view=view)
+    if value == 'type':
+        view.add_item(TicketChannelTypeSelect(guild_id))
+        return await interaction.response.edit_message(embed=status_embed('📌 Tipo de canal', 'Escolha o tipo de canal disponível para os tickets.'), view=view)
+    if value == 'image':
+        return await interaction.response.send_modal(TicketOpeningImageModal(guild_id))
+    if value == 'limit':
+        return await interaction.response.send_modal(TicketLimitModal(guild_id))
+
 class TicketSetupView(discord.ui.View):
+    """Menu visual de Configurações de Tickets; todas as opções ficam na mesma mensagem."""
     def __init__(self, guild_id: int):
         super().__init__(timeout=300)
         self.guild_id = guild_id
-        self.add_item(TicketSetupSelect(guild_id))
 
-    @discord.ui.button(label='Personalizar textos', style=discord.ButtonStyle.primary, emoji='✏️', row=1)
-    async def customize(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(TicketTextModal(self.guild_id))
+    @discord.ui.button(label='Cargos de Suporte', emoji='👥', style=discord.ButtonStyle.secondary, row=0)
+    async def roles(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_ticket_setting(interaction, self.guild_id, 'role')
 
-    @discord.ui.button(label='Limite de tickets', style=discord.ButtonStyle.secondary, emoji='🔢', row=1)
+    @discord.ui.button(label='Categoria dos Tickets', emoji='📁', style=discord.ButtonStyle.secondary, row=0)
+    async def category(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_ticket_setting(interaction, self.guild_id, 'category')
+
+    @discord.ui.button(label='Canal de Logs', emoji='📋', style=discord.ButtonStyle.secondary, row=1)
+    async def logs(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_ticket_setting(interaction, self.guild_id, 'logs')
+
+    @discord.ui.button(label='Canal de Avaliação', emoji='⭐', style=discord.ButtonStyle.secondary, row=1)
+    async def evaluation(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_ticket_setting(interaction, self.guild_id, 'evaluation')
+
+    @discord.ui.button(label='Nome do Canal', emoji='✏️', style=discord.ButtonStyle.secondary, row=2)
+    async def name(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_ticket_setting(interaction, self.guild_id, 'name')
+
+    @discord.ui.button(label='Tipo de Canal', emoji='📌', style=discord.ButtonStyle.secondary, row=2)
+    async def channel_type(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_ticket_setting(interaction, self.guild_id, 'type')
+
+    @discord.ui.button(label='Imagem ao Abrir', emoji='🖼️', style=discord.ButtonStyle.secondary, row=3)
+    async def image(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await open_ticket_setting(interaction, self.guild_id, 'image')
+
+    @discord.ui.button(label='Limite por Usuário', emoji='👤', style=discord.ButtonStyle.secondary, row=3)
     async def limit(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(TicketLimitModal(self.guild_id))
+        await open_ticket_setting(interaction, self.guild_id, 'limit')
 
-    @discord.ui.button(label='Publicar painel', style=discord.ButtonStyle.success, emoji='📨', row=2)
-    async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(embed=status_embed('📨 Publicar painel', 'Escolha o canal usando o menu abaixo.'), view=TicketPublishView(self.guild_id))
+    @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.primary, row=4)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=status_embed('🔧 | Configurações Gerais', 'Ajustes que controlam o funcionamento do sistema de tickets.\n\n🎫 **Atendimento** — cargos, categoria, logs, avaliação e opções dos tickets.\n✏️ **Personalização** — título, descrição e mensagem de boas-vindas.\n📨 **Publicação** — enviar o painel para um canal.', success=True),
+            view=TicketSetupView(self.guild_id)
+        )
 
-class TicketSetupSelect(discord.ui.Select):
+class TicketSetupSubView(discord.ui.View):
+    """Mantém cada configuração no mesmo painel e oferece retorno ao menu Atendimento."""
     def __init__(self, guild_id: int):
+        super().__init__(timeout=300)
         self.guild_id = guild_id
-        options = [
-            discord.SelectOption(label='Categoria dos tickets', description='Onde os canais privados serão criados', emoji='📁', value='category'),
-            discord.SelectOption(label='Cargos de atendimento', description='Adicionar/editar vários cargos autorizados', emoji='👥', value='role'),
-            discord.SelectOption(label='Canal de logs', description='Registrar abertura e fechamento', emoji='📋', value='logs'),
-        ]
-        super().__init__(placeholder='⚙️ Atendimento — selecione uma configuração', min_values=1, max_values=1, options=options, row=0)
 
+    @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=status_embed(
+                '🎫 Atendimento — Configurações',
+                'Escolha uma opção para configurar.\n\n'
+                '• Cargos de Suporte\n'
+                '• Categoria dos Tickets\n'
+                '• Canal de Logs\n'
+                '• Canal de Avaliação\n'
+                '• Nome do Canal\n'
+                '• Tipo de Canal\n'
+                '• Imagem ao Abrir\n'
+                '• Limite por Usuário'            ),
+            view=TicketSetupView(self.guild_id)
+        )
+
+class TicketEvaluationChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, guild_id):
+        self.guild_id = guild_id
+        super().__init__(placeholder='Selecione o canal de avaliações', channel_types=[discord.ChannelType.text], min_values=1, max_values=1)
     async def callback(self, interaction: discord.Interaction):
-        value = self.values[0]
-        view = discord.ui.View(timeout=180)
-        if value == 'category':
-            view.add_item(TicketCategorySelect(self.guild_id))
-            return await interaction.response.edit_message(embed=status_embed('📁 Categoria dos tickets', 'Selecione a categoria onde os tickets serão criados.'), view=view)
-        if value == 'role':
-            view.add_item(TicketRoleSelect(self.guild_id))
-            return await interaction.response.edit_message(embed=status_embed('👥 Cargos de atendimento', 'Selecione todos os cargos autorizados a atender tickets.'), view=view)
-        view.add_item(TicketLogsSelect(self.guild_id))
-        await interaction.response.edit_message(embed=status_embed('📋 Canal de logs', 'Selecione o canal para registrar abertura e fechamento dos tickets.'), view=view)
+        channel = self.values[0]
+        set_cfg(self.guild_id, 'ticket_evaluation_channel_id', channel.id)
+        await interaction.response.edit_message(embed=status_embed('✅ Canal de avaliação salvo', f'As avaliações serão publicadas em {channel.mention}.', success=True), view=TicketSetupView(self.guild_id))
+
+class TicketNameFormatSelect(discord.ui.Select):
+    def __init__(self, guild_id):
+        self.guild_id = guild_id
+        current = cfg(guild_id, 'ticket_name_format', 'ticket-{assunto}-{usuario}')
+        options = [
+            discord.SelectOption(label='ticket-assunto-usuario', value='ticket-{assunto}-{usuario}', description='Ex.: ticket-compra-neymar'),
+            discord.SelectOption(label='usuario-ticket', value='{usuario}-ticket', description='Ex.: neymar-ticket'),
+            discord.SelectOption(label='assunto-usuario', value='{assunto}-{usuario}', description='Ex.: compra-neymar'),
+            discord.SelectOption(label='atendimento-usuario', value='atendimento-{usuario}', description='Ex.: atendimento-neymar'),
+        ]
+        for option in options:
+            option.default = option.value == current
+        super().__init__(placeholder='Escolha o formato do nome', min_values=1, max_values=1, options=options)
+    async def callback(self, interaction: discord.Interaction):
+        pattern = self.values[0]
+        set_cfg(self.guild_id, 'ticket_name_format', pattern)
+        await interaction.response.edit_message(embed=status_embed('✅ Formato do nome salvo', f'Novos tickets usarão o formato `{pattern}`.', success=True), view=TicketSetupView(self.guild_id))
+
+class TicketChannelTypeSelect(discord.ui.Select):
+    def __init__(self, guild_id):
+        self.guild_id = guild_id
+        super().__init__(placeholder='Tipo de canal suportado', min_values=1, max_values=1, options=[
+            discord.SelectOption(label='Canal de texto privado', value='text', emoji='📝', description='Canal privado com permissões individuais', default=True)
+        ])
+    async def callback(self, interaction: discord.Interaction):
+        set_cfg(self.guild_id, 'ticket_channel_type', self.values[0])
+        await interaction.response.edit_message(embed=status_embed('✅ Tipo de canal salvo', 'Os tickets serão criados como canais de texto privados dentro da categoria configurada.', success=True), view=TicketSetupView(self.guild_id))
+
+class TicketOpeningImageModal(discord.ui.Modal, title='Imagem ao abrir ticket'):
+    image_url = discord.ui.TextInput(label='URL da imagem (vazio para remover)', placeholder='https://...', required=False, max_length=500)
+    def __init__(self, guild_id):
+        super().__init__()
+        self.guild_id = guild_id
+        self.image_url.default = cfg(guild_id, 'ticket_opening_image', '')[:500]
+    async def on_submit(self, interaction: discord.Interaction):
+        url = self.image_url.value.strip()
+        if url and not url.startswith(('https://', 'http://')):
+            return await interaction.response.send_message(embed=status_embed('❌ URL inválida', 'Informe uma URL começando com https:// ou http://, ou deixe vazio para remover.', success=False), ephemeral=True)
+        set_cfg(self.guild_id, 'ticket_opening_image', url)
+        await interaction.response.send_message(embed=status_embed('✅ Imagem atualizada', 'A imagem será exibida na mensagem de boas-vindas dos próximos tickets.' if url else 'A imagem de boas-vindas foi removida.', success=True), ephemeral=True)
 
 class TicketCategorySelect(discord.ui.ChannelSelect):
     def __init__(self, guild_id):
@@ -936,9 +1047,11 @@ async def config_ticket(interaction: discord.Interaction):
     category = guild.get_channel(category_id) if category_id else None
     role = guild.get_role(role_id) if role_id else None
     logs = guild.get_channel(logs_id) if logs_id else None
+    evaluation_id = int(cfg(guild.id, 'ticket_evaluation_channel_id', '0') or 0)
+    evaluation_channel = guild.get_channel(evaluation_id) if evaluation_id else None
     embed = status_embed('🔧 | Configurações Gerais', 'Ajustes que controlam o funcionamento do sistema de tickets no servidor.\n\n**👥 Atendimento** — cargos, categoria e logs. Cada opção pode ser configurada individualmente.\n**✏️ Personalização** — título, descrição e mensagem de boas-vindas.\n**🔢 Limite de tickets** — quantidade máxima de tickets abertos por pessoa.\n**📨 Publicação** — enviar o painel para o canal escolhido.', success=True)
     role_mentions = ', '.join(guild.get_role(rid).mention for rid in role_ids if guild.get_role(rid)) or (role.mention if role else 'Não configurado')
-    embed.add_field(name='📌 Estado atual', value=f"**Categoria:** {category.name if isinstance(category, discord.CategoryChannel) else 'Não configurada'}\n**Cargos de atendimento:** {role_mentions}\n**Canal de logs:** {logs.mention if isinstance(logs, discord.TextChannel) else 'Não configurado'}\n**Limite por pessoa:** {cfg(guild.id, 'ticket_open_limit', '1')}", inline=False)
+    embed.add_field(name='📌 Estado atual', value=f"**Categoria:** {category.name if isinstance(category, discord.CategoryChannel) else 'Não configurada'}\n**Cargos de atendimento:** {role_mentions}\n**Canal de logs:** {logs.mention if isinstance(logs, discord.TextChannel) else 'Não configurado'}\n**Canal de avaliação:** {evaluation_channel.mention if isinstance(evaluation_channel, discord.TextChannel) else 'Usa o canal de logs'}\n**Formato do nome:** `{cfg(guild.id, 'ticket_name_format', 'ticket-{assunto}-{usuario}')}`\n**Imagem ao abrir:** {'Configurada' if cfg(guild.id, 'ticket_opening_image', '') else 'Não configurada'}\n**Limite por pessoa:** {cfg(guild.id, 'ticket_open_limit', '1')}", inline=False)
     embed.set_footer(text=f'{SHOP_NAME} • Painel administrativo • Só você pode ver esta mensagem')
     await interaction.response.send_message(embed=embed, view=TicketSetupView(guild.id), ephemeral=True)
 
