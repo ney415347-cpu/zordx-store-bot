@@ -1189,18 +1189,25 @@ class TicketPublishChannelSelect(discord.ui.ChannelSelect):
         super().__init__(placeholder='Escolha onde publicar o painel', channel_types=[discord.ChannelType.text], min_values=1, max_values=1)
     async def callback(self, interaction: discord.Interaction):
         channel = self.values[0]
+        # Reconhece a interação imediatamente para evitar "O aplicativo não respondeu".
+        await interaction.response.defer()
         title = cfg(self.guild_id, 'ticket_panel_title', '🎫 Central de Atendimento')
         description = cfg(self.guild_id, 'ticket_panel_description', 'Precisa de ajuda? Clique no botão abaixo para abrir um ticket privado com a equipe.')
-        embed = discord.Embed(title=title[:256], description=description[:4000], color=color_from(DEFAULT_COLOR))
-        embed.add_field(name='🔒 Atendimento privado', value='Somente você e a equipe autorizada poderão ver seu ticket.', inline=True)
-        embed.add_field(name='⚡ Como funciona', value='Clique em **Abrir ticket** e descreva o que precisa.', inline=True)
-        embed.add_field(name='🧾 Antes de abrir', value='Envie detalhes úteis para agilizar o atendimento.', inline=False)
-        embed.set_footer(text=f'{SHOP_NAME} • Central de suporte')
+        panel_embed = discord.Embed(title=title[:256], description=description[:4000], color=color_from(DEFAULT_COLOR))
+        panel_embed.add_field(name='🔒 Atendimento privado', value='Somente você e a equipe autorizada poderão ver seu ticket.', inline=True)
+        panel_embed.add_field(name='⚡ Como funciona', value='Clique em **Abrir ticket** e descreva o que precisa.', inline=True)
+        panel_embed.add_field(name='🧾 Antes de abrir', value='Envie detalhes úteis para agilizar o atendimento.', inline=False)
+        panel_embed.set_footer(text=f'{SHOP_NAME} • Central de suporte')
         try:
-            await channel.send(embed=embed, view=TicketPanelView())
-        except (discord.Forbidden, discord.HTTPException):
-            return await interaction.response.edit_message(embed=status_embed('❌ Não foi possível publicar', 'Confira as permissões do bot no canal escolhido.', success=False), view=TicketSetupView(self.guild_id))
-        await interaction.response.edit_message(embed=status_embed('✅ Painel publicado', f'O painel de tickets foi publicado em {channel.mention}.', success=True), view=TicketSetupView(self.guild_id))
+            await channel.send(embed=panel_embed, view=TicketPanelView())
+        except discord.Forbidden:
+            result = status_embed('❌ Sem permissão', 'O bot não pode enviar mensagens ou incorporar links nesse canal. Confira as permissões do canal escolhido.', success=False)
+        except discord.HTTPException as exc:
+            logging.exception('Falha ao publicar painel de tickets no canal %s', getattr(channel, 'id', 'desconhecido'))
+            result = status_embed('❌ Falha ao publicar', f'O Discord recusou a publicação (código {exc.status}). Tente novamente e confira as permissões.', success=False)
+        else:
+            result = status_embed('✅ Painel publicado', f'O painel de tickets foi publicado em {channel.mention}.', success=True)
+        await interaction.edit_original_response(embed=result, view=TicketSetupView(self.guild_id))
 
 @bot.tree.command(name='config-ticket', description='Abrir painel interativo de configuração de tickets')
 @staff_only()
