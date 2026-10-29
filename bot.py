@@ -863,6 +863,174 @@ async def open_ticket_setting(interaction: discord.Interaction, guild_id: int, v
     if value == 'limit':
         return await interaction.response.send_modal(TicketLimitModal(guild_id))
 
+class TicketHomeView(discord.ui.View):
+    """Menu principal das configurações, no padrão visual aprovado."""
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label='Painéis de Ticket', emoji='🧩', style=discord.ButtonStyle.primary, row=0)
+    async def ticket_panels(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=status_embed('🧩 | Painéis de Ticket', 'Escolha uma opção para configurar os painéis de tickets. Todas as opções ficam neste menu.', success=True), view=TicketSetupView(self.guild_id))
+
+    @discord.ui.button(label='Configurações Gerais', emoji='🔧', style=discord.ButtonStyle.secondary, row=0)
+    async def general_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=status_embed('🔧 | Configurações Gerais', 'Personalize os recursos gerais da ZORDX STORE BOT.', success=True), view=GeneralSettingsView(self.guild_id))
+
+    @discord.ui.button(label='Atendimento', emoji='👥', style=discord.ButtonStyle.secondary, row=1)
+    async def atendimento(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=status_embed('👥 | Atendimento', 'Ajuste os cargos, categoria, logs e avaliações do atendimento.', success=True), view=TicketSetupView(self.guild_id))
+
+    @discord.ui.button(label='Atendimento por Horário', emoji='🕒', style=discord.ButtonStyle.secondary, row=1)
+    async def schedule(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=schedule_embed(self.guild_id), view=ScheduleSettingsView(self.guild_id))
+
+    @discord.ui.button(label='Inteligência Artificial', emoji='🤖', style=discord.ButtonStyle.secondary, row=2)
+    async def ai(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=ai_embed(self.guild_id), view=AISettingsView(self.guild_id))
+
+    @discord.ui.button(label='Global', emoji='🌐', style=discord.ButtonStyle.secondary, row=2)
+    async def global_settings(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=global_embed(self.guild_id), view=GlobalSettingsView(self.guild_id))
+
+    @discord.ui.button(label='Enviar Painel', emoji='📨', style=discord.ButtonStyle.success, row=3)
+    async def publish_panel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=status_embed('📨 | Enviar Painel', 'Escolha o canal onde deseja publicar o painel de abertura de tickets.'), view=TicketPublishView(self.guild_id))
+
+
+def schedule_embed(guild_id):
+    enabled = cfg(guild_id, 'schedule_enabled', '0') == '1'
+    saved = cfg(guild_id, 'schedule_text', 'Segunda a sexta: 08:00-22:00\nSábado: 10:00-20:00\nDomingo: 10:00-18:00')
+    return status_embed('🕒 | Atendimento por Horário', f"**Status:** {'Ativado' if enabled else 'Desativado'}\n\n{saved}")
+
+
+def ai_embed(guild_id):
+    enabled = cfg(guild_id, 'ai_enabled', '0') == '1'
+    return status_embed('🤖 | Inteligência Artificial', f"**Status:** {'Ativada' if enabled else 'Desativada'}\n**Modelo configurado:** {cfg(guild_id, 'ai_model', 'GPT-4o (configuração)')}\n**Prompt:** {'Personalizado' if cfg(guild_id, 'ai_prompt', '') else 'Padrão'}\n\nAtive ou desative o recurso e configure o modelo e as instruções. A integração depende de uma chave/API compatível.")
+
+
+def global_embed(guild_id):
+    return status_embed('🌐 | Global', f"**Nome do bot:** {cfg(guild_id, 'global_bot_name', SHOP_NAME)}\n**Prefixo informativo:** {cfg(guild_id, 'global_prefix', '/')}\n**Idioma:** {cfg(guild_id, 'global_language', 'Português (BR)')}\n**Logs no console:** {'Ativados' if cfg(guild_id, 'global_console_logs', '1') == '1' else 'Desativados'}\n**Avisos de erro:** {'Ativados' if cfg(guild_id, 'global_error_notices', '1') == '1' else 'Desativados'}")
+
+
+class GeneralSettingsView(discord.ui.View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=300); self.guild_id = guild_id
+    @discord.ui.button(label='Atendimento', emoji='👥', style=discord.ButtonStyle.primary, row=0)
+    async def support(self, interaction, button):
+        await interaction.response.edit_message(embed=status_embed('👥 | Atendimento', 'Configure os recursos do sistema de tickets.'), view=TicketSetupView(self.guild_id))
+    @discord.ui.button(label='Atendimento por Horário', emoji='🕒', style=discord.ButtonStyle.secondary, row=0)
+    async def schedule(self, interaction, button):
+        await interaction.response.edit_message(embed=schedule_embed(self.guild_id), view=ScheduleSettingsView(self.guild_id))
+    @discord.ui.button(label='Inteligência Artificial', emoji='🤖', style=discord.ButtonStyle.secondary, row=1)
+    async def ai(self, interaction, button):
+        await interaction.response.edit_message(embed=ai_embed(self.guild_id), view=AISettingsView(self.guild_id))
+    @discord.ui.button(label='Global', emoji='🌐', style=discord.ButtonStyle.secondary, row=1)
+    async def global_settings(self, interaction, button):
+        await interaction.response.edit_message(embed=global_embed(self.guild_id), view=GlobalSettingsView(self.guild_id))
+    @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.secondary, row=2)
+    async def back(self, interaction, button):
+        await interaction.response.edit_message(embed=status_embed('🎫 | Sistema de Tickets', 'Escolha uma área para configurar a ZORDX STORE BOT.'), view=TicketHomeView(self.guild_id))
+
+
+class ScheduleModal(discord.ui.Modal, title='Horários de atendimento'):
+    def __init__(self, guild_id):
+        super().__init__(); self.guild_id = guild_id
+        self.hours = discord.ui.TextInput(label='Horários por dia', style=discord.TextStyle.paragraph, default='Segunda a sexta: 08:00-22:00\nSábado: 10:00-20:00\nDomingo: 10:00-18:00', max_length=800)
+        self.add_item(self.hours)
+    async def on_submit(self, interaction):
+        set_cfg(self.guild_id, 'schedule_text', self.hours.value)
+        await interaction.response.edit_message(embed=status_embed('✅ Horários salvos', self.hours.value, success=True), view=ScheduleSettingsView(self.guild_id))
+
+
+class ScheduleSettingsView(discord.ui.View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=300); self.guild_id = guild_id
+    @discord.ui.button(label='Ativar / Desativar', emoji='🔘', style=discord.ButtonStyle.primary, row=0)
+    async def toggle(self, interaction, button):
+        enabled = cfg(self.guild_id, 'schedule_enabled', '0') != '1'
+        set_cfg(self.guild_id, 'schedule_enabled', '1' if enabled else '0')
+        await interaction.response.edit_message(embed=schedule_embed(self.guild_id), view=self)
+    @discord.ui.button(label='Editar horários', emoji='🕒', style=discord.ButtonStyle.secondary, row=0)
+    async def edit_hours(self, interaction, button):
+        modal = ScheduleModal(self.guild_id)
+        saved = cfg(self.guild_id, 'schedule_text', '')
+        if saved: modal.hours.default = saved[:800]
+        await interaction.response.send_modal(modal)
+    @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction, button):
+        await interaction.response.edit_message(embed=status_embed('🔧 | Configurações Gerais', 'Personalize os recursos gerais da ZORDX STORE BOT.'), view=GeneralSettingsView(self.guild_id))
+
+
+class AIModal(discord.ui.Modal, title='Configurar Inteligência Artificial'):
+    def __init__(self, guild_id):
+        super().__init__(); self.guild_id = guild_id
+        self.model = discord.ui.TextInput(label='Nome do modelo/provedor', default=cfg(guild_id, 'ai_model', 'GPT-4o')[:100], max_length=100)
+        self.prompt = discord.ui.TextInput(label='Instruções da IA', style=discord.TextStyle.paragraph, default=cfg(guild_id, 'ai_prompt', 'Você é o assistente de suporte da ZORDX STORE.')[:1800], max_length=1800)
+        self.add_item(self.model); self.add_item(self.prompt)
+    async def on_submit(self, interaction):
+        set_cfg(self.guild_id, 'ai_model', self.model.value.strip())
+        set_cfg(self.guild_id, 'ai_prompt', self.prompt.value)
+        await interaction.response.edit_message(embed=ai_embed(self.guild_id), view=AISettingsView(self.guild_id))
+
+
+class AISettingsView(discord.ui.View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=300); self.guild_id = guild_id
+    @discord.ui.button(label='Ativar / Desativar IA', emoji='🤖', style=discord.ButtonStyle.primary, row=0)
+    async def toggle(self, interaction, button):
+        enabled = cfg(self.guild_id, 'ai_enabled', '0') != '1'
+        set_cfg(self.guild_id, 'ai_enabled', '1' if enabled else '0')
+        await interaction.response.edit_message(embed=ai_embed(self.guild_id), view=self)
+    @discord.ui.button(label='Editar prompt e modelo', emoji='✏️', style=discord.ButtonStyle.secondary, row=0)
+    async def edit(self, interaction, button):
+        await interaction.response.send_modal(AIModal(self.guild_id))
+    @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction, button):
+        await interaction.response.edit_message(embed=status_embed('🔧 | Configurações Gerais', 'Personalize os recursos gerais da ZORDX STORE BOT.'), view=GeneralSettingsView(self.guild_id))
+
+
+class GlobalModal(discord.ui.Modal, title='Configurações globais'):
+    def __init__(self, guild_id):
+        super().__init__(); self.guild_id = guild_id
+        self.name = discord.ui.TextInput(label='Nome exibido do bot', default=cfg(guild_id, 'global_bot_name', SHOP_NAME)[:100], max_length=100)
+        self.prefix = discord.ui.TextInput(label='Prefixo informativo', default=cfg(guild_id, 'global_prefix', '/')[:5], max_length=5)
+        self.language = discord.ui.TextInput(label='Idioma', default=cfg(guild_id, 'global_language', 'Português (BR)')[:50], max_length=50)
+        self.add_item(self.name); self.add_item(self.prefix); self.add_item(self.language)
+    async def on_submit(self, interaction):
+        set_cfg(self.guild_id, 'global_bot_name', self.name.value)
+        set_cfg(self.guild_id, 'global_prefix', self.prefix.value)
+        set_cfg(self.guild_id, 'global_language', self.language.value)
+        await interaction.response.edit_message(embed=global_embed(self.guild_id), view=GlobalSettingsView(self.guild_id))
+
+
+class GlobalSettingsView(discord.ui.View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=300); self.guild_id = guild_id
+    @discord.ui.button(label='Editar configurações', emoji='✏️', style=discord.ButtonStyle.primary, row=0)
+    async def edit(self, interaction, button):
+        await interaction.response.send_modal(GlobalModal(self.guild_id))
+    @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction, button):
+        await interaction.response.edit_message(embed=status_embed('🔧 | Configurações Gerais', 'Personalize os recursos gerais da ZORDX STORE BOT.'), view=GeneralSettingsView(self.guild_id))
+
+
+class TicketGeneralView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label='Personalizar mensagem', emoji='✏️', style=discord.ButtonStyle.primary, row=0)
+    async def customize(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TicketTextModal(self.guild_id))
+
+    @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.secondary, row=1)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=status_embed('🎫 | Sistema de Tickets', 'Bem-vindo ao painel de configuração da ZORDX STORE BOT.\n\n**Painéis de Ticket** — cargos, categoria, logs, avaliações, nome, tipo, imagem e limite.\n**Configurações Gerais** — atendimento, horários, inteligência artificial e opções globais.\n**Enviar Painel** — publique o painel de abertura em um canal.', success=True),
+            view=TicketHomeView(self.guild_id)
+        )
+
 class TicketSetupView(discord.ui.View):
     """Menu visual de Configurações de Tickets; todas as opções ficam na mesma mensagem."""
     def __init__(self, guild_id: int):
@@ -904,8 +1072,8 @@ class TicketSetupView(discord.ui.View):
     @discord.ui.button(label='Voltar', emoji='⬅️', style=discord.ButtonStyle.primary, row=4)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=status_embed('🔧 | Configurações Gerais', 'Ajustes que controlam o funcionamento do sistema de tickets.\n\n🎫 **Atendimento** — cargos, categoria, logs, avaliação e opções dos tickets.\n✏️ **Personalização** — título, descrição e mensagem de boas-vindas.\n📨 **Publicação** — enviar o painel para um canal.', success=True),
-            view=TicketSetupView(self.guild_id)
+            embed=status_embed('🎫 | Sistema de Tickets', 'Bem-vindo ao painel de configuração da ZORDX STORE BOT.\n\n**Painéis de Ticket** — cargos, categoria, logs, avaliações, nome, tipo, imagem e limite.\n**Configurações Gerais** — atendimento, horários, inteligência artificial e opções globais.\n**Enviar Painel** — publique o painel de abertura em um canal.', success=True),
+            view=TicketHomeView(self.guild_id)
         )
 
 class TicketSetupSubView(discord.ui.View):
@@ -1049,11 +1217,11 @@ async def config_ticket(interaction: discord.Interaction):
     logs = guild.get_channel(logs_id) if logs_id else None
     evaluation_id = int(cfg(guild.id, 'ticket_evaluation_channel_id', '0') or 0)
     evaluation_channel = guild.get_channel(evaluation_id) if evaluation_id else None
-    embed = status_embed('🔧 | Configurações Gerais', 'Ajustes que controlam o funcionamento do sistema de tickets no servidor.\n\n**👥 Atendimento** — cargos, categoria e logs. Cada opção pode ser configurada individualmente.\n**✏️ Personalização** — título, descrição e mensagem de boas-vindas.\n**🔢 Limite de tickets** — quantidade máxima de tickets abertos por pessoa.\n**📨 Publicação** — enviar o painel para o canal escolhido.', success=True)
+    embed = status_embed('🎫 | Sistema de Tickets', 'Bem-vindo ao painel de configuração da ZORDX STORE BOT.\n\n**Painéis de Ticket** — cargos, categoria, logs, avaliações, nome, tipo, imagem e limite.\n**Configurações Gerais** — atendimento, horários, inteligência artificial e opções globais.\n**Enviar Painel** — publique o painel de abertura em um canal.', success=True)
     role_mentions = ', '.join(guild.get_role(rid).mention for rid in role_ids if guild.get_role(rid)) or (role.mention if role else 'Não configurado')
     embed.add_field(name='📌 Estado atual', value=f"**Categoria:** {category.name if isinstance(category, discord.CategoryChannel) else 'Não configurada'}\n**Cargos de atendimento:** {role_mentions}\n**Canal de logs:** {logs.mention if isinstance(logs, discord.TextChannel) else 'Não configurado'}\n**Canal de avaliação:** {evaluation_channel.mention if isinstance(evaluation_channel, discord.TextChannel) else 'Usa o canal de logs'}\n**Formato do nome:** `{cfg(guild.id, 'ticket_name_format', 'ticket-{assunto}-{usuario}')}`\n**Imagem ao abrir:** {'Configurada' if cfg(guild.id, 'ticket_opening_image', '') else 'Não configurada'}\n**Limite por pessoa:** {cfg(guild.id, 'ticket_open_limit', '1')}", inline=False)
     embed.set_footer(text=f'{SHOP_NAME} • Painel administrativo • Só você pode ver esta mensagem')
-    await interaction.response.send_message(embed=embed, view=TicketSetupView(guild.id), ephemeral=True)
+    await interaction.response.send_message(embed=embed, view=TicketHomeView(guild.id), ephemeral=True)
 
 @bot.tree.command(name='saldo', description='Consultar seu saldo disponível para saque')
 async def saldo(interaction: discord.Interaction):
