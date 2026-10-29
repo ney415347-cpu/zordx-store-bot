@@ -1,6 +1,5 @@
 import os
 import json
-import io
 import sqlite3
 import logging
 from datetime import datetime, timezone
@@ -154,7 +153,7 @@ class PublishPanelView(discord.ui.View):
                 c.execute('INSERT INTO zordx_panels(guild_id,title,description,category,image_url,color,buttons_json,channel_id,message_id,created_by) VALUES(?,?,?,?,?,?,?,?,?,?)', (self.guild_id, self.title_text, self.description_text, self.category, self.image_url, self.color, json.dumps(self.buttons, ensure_ascii=False), channel.id, message.id, self.creator_id))
             for item in self.children:
                 item.disabled = True
-            await interaction.response.edit_message(embed=status_embed('✅ Painel publicado', f'O painel **{self.title_text}** foi publicado em {channel.mention} e registrado para edição futura.', success=True), view=self)
+            await interaction.response.edit_message(content=None, embed=status_embed('✅ Painel publicado', f'O painel **{self.title_text}** foi publicado em {channel.mention} e registrado para edição futura.', success=True), view=self)
         except discord.Forbidden:
             await interaction.response.send_message(ephemeral=True, embed=status_embed('ZORDX STORE', 'Não tenho permissão para enviar mensagens ou embeds nesse canal.'))
 
@@ -164,7 +163,7 @@ class PublishPanelView(discord.ui.View):
             return await interaction.response.send_message(ephemeral=True, embed=status_embed('ZORDX STORE', 'Somente quem iniciou pode cancelar.'))
         for item in self.children:
             item.disabled = True
-        await interaction.response.edit_message(embed=status_embed('❌ Criação cancelada', 'A criação do painel foi cancelada.', success=False), view=self)
+        await interaction.response.edit_message(content=None, embed=status_embed('Criação cancelada', 'A criação do painel foi cancelada.', success=False), view=self)
 
 class PanelSelect(discord.ui.Select):
 
@@ -299,16 +298,12 @@ class TicketCloseView(discord.ui.View):
         try:
             await interaction.channel.delete(reason=f'Ticket fechado por {interaction.user}')
         except discord.Forbidden:
-            await interaction.followup.send(embed=status_embed('❌ Não foi possível fechar', 'Não tenho permissão para apagar este canal. Confira a permissão **Gerenciar canais**.', success=False), ephemeral=True)
+            await interaction.followup.send(embed=status_embed('❌ Sem permissão', 'Não tenho permissão para apagar este canal. Confira a permissão **Gerenciar canais**.', success=False), ephemeral=True)
 
 class TicketPanelView(discord.ui.View):
 
-    def __init__(self, guild_id=None):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.guild_id = guild_id
-        if guild_id:
-            configured_label = cfg(guild_id, 'ticket_button_label', 'Abrir ticket')
-            self.open_ticket.label = (configured_label or 'Abrir ticket')[:80]
 
     @discord.ui.button(label='Abrir ticket', style=discord.ButtonStyle.primary, emoji='🎫', custom_id='zordx:ticket:open')
     async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -317,24 +312,10 @@ class TicketPanelView(discord.ui.View):
             return await interaction.response.send_message(ephemeral=True, embed=status_embed('ZORDX STORE', 'Este painel só funciona dentro de um servidor.'))
         category_id = int(cfg(guild.id, 'ticket_category_id', '0') or 0)
         support_role_id = int(cfg(guild.id, 'ticket_support_role_id', '0') or 0)
-        staff_role_id = int(cfg(guild.id, 'ticket_staff_role_id', '0') or 0)
-        admin_role_id = int(cfg(guild.id, 'ticket_admin_role_id', '0') or 0)
-        blocked_role_id = int(cfg(guild.id, 'ticket_blocked_role_id', '0') or 0)
         category = guild.get_channel(category_id) if category_id else None
         support_role = guild.get_role(support_role_id) if support_role_id else None
-        staff_role = guild.get_role(staff_role_id) if staff_role_id else None
-        admin_role = guild.get_role(admin_role_id) if admin_role_id else None
-        blocked_role = guild.get_role(blocked_role_id) if blocked_role_id else None
-        if blocked_role and isinstance(interaction.user, discord.Member) and blocked_role in interaction.user.roles:
-            return await interaction.response.send_message(ephemeral=True, embed=status_embed('🎫 Abertura bloqueada', 'Você não tem permissão para abrir tickets neste servidor.'))
         if not isinstance(category, discord.CategoryChannel):
-            return await interaction.response.send_message(ephemeral=True, embed=status_embed('ZORDX STORE', 'Os tickets ainda não estão configurados. Use `/config-ticket geral` para configurar.'))
-        cooldown = max(0, min(86400, int(cfg(guild.id, 'ticket_cooldown', '0') or 0)))
-        last_open = float(cfg(guild.id, f'ticket_last_open_{interaction.user.id}', '0') or 0)
-        now_ts = datetime.now(timezone.utc).timestamp()
-        if cooldown and now_ts - last_open < cooldown:
-            remaining = int(cooldown - (now_ts - last_open))
-            return await interaction.response.send_message(ephemeral=True, embed=status_embed('⏳ Aguarde', f'Você poderá abrir outro ticket em aproximadamente {remaining} segundo(s).'))
+            return await interaction.response.send_message(ephemeral=True, embed=status_embed('ZORDX STORE', 'Os tickets ainda não estão configurados. Peça à equipe para usar `/config-ticket`.'))
         with db() as c:
             existing = c.execute("SELECT channel_id FROM zordx_tickets WHERE guild_id=? AND user_id=? AND status='Aberto'", (guild.id, interaction.user.id)).fetchall()
         active_channels = [guild.get_channel(int(channel_id)) for channel_id, in existing]
@@ -344,34 +325,18 @@ class TicketPanelView(discord.ui.View):
             mentions = ', '.join((channel.mention for channel in active_channels[:5]))
             return await interaction.response.send_message(ephemeral=True, embed=status_embed('ZORDX STORE', f'Você atingiu o limite de {limit} ticket(s) aberto(s). {mentions}'))
         overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=False), interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True), guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)}
-        for staff_role in (support_role, staff_role, admin_role):
-            if staff_role:
-                overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True)
-        base = ''.join((ch.lower() if ch.isalnum() else '-' for ch in interaction.user.name)).strip('-')[:35] or 'usuario'
+        if support_role:
+            overwrites[support_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        base = ''.join((ch.lower() if ch.isalnum() else '-' for ch in interaction.user.name)).strip('-')[:40] or 'usuario'
         try:
-            ticket_type = cfg(guild.id, 'ticket_type', 'Suporte')
             channel = await guild.create_text_channel(f'ticket-{base}', category=category, overwrites=overwrites, reason=f'Ticket aberto por {interaction.user}')
             with db() as c:
                 c.execute('INSERT INTO zordx_tickets(guild_id,channel_id,user_id) VALUES(?,?,?)', (guild.id, channel.id, interaction.user.id))
-            set_cfg(guild.id, f'ticket_last_open_{interaction.user.id}', now_ts)
             greeting = cfg(guild.id, 'ticket_greeting', 'Explique como podemos ajudar. A equipe responderá assim que possível.')
-            mention_roles = ' '.join(role.mention for role in (support_role, staff_role, admin_role) if role) or 'Equipe de suporte'
-            priority = cfg(guild.id, 'ticket_priority', 'Normal')
-            questions = cfg(guild.id, 'ticket_questions', '')
-            body = f'Olá {interaction.user.mention}!\n\n{greeting}'
-            if questions:
-                body += f'\n\n**Informações necessárias:**\n{questions}'
-            embed = discord.Embed(title=f'🎫 {ticket_type} aberto', description=f'{interaction.user.mention} • {mention_roles}\n\n{body}'[:4000], color=color_from(cfg(guild.id, 'ticket_color', DEFAULT_COLOR)))
-            embed.add_field(name='Prioridade', value=priority[:100], inline=True)
-            thumbnail = cfg(guild.id, 'ticket_thumbnail', '')
-            image = cfg(guild.id, 'ticket_image', '')
-            footer = cfg(guild.id, 'ticket_footer', f'{SHOP_NAME} • Sistema de tickets')
-            if thumbnail.startswith(('https://', 'http://')):
-                embed.set_thumbnail(url=thumbnail)
-            if image.startswith(('https://', 'http://')):
-                embed.set_image(url=image)
-            embed.set_footer(text=footer[:2048])
-            await channel.send(embed=embed, view=TicketCloseView())
+            mention_role = support_role.mention if support_role else 'Equipe de suporte'
+            embed = discord.Embed(title='🎫 Atendimento aberto', description=f'Olá {interaction.user.mention}!\n\n{greeting}', color=color_from(DEFAULT_COLOR))
+            embed.set_footer(text=f'{SHOP_NAME} • Sistema de tickets')
+            await channel.send(content=f'{interaction.user.mention} • {mention_role}', embed=embed, view=TicketCloseView())
             await interaction.response.send_message(ephemeral=True, embed=status_embed('ZORDX STORE', f'✅ Seu ticket foi criado: {channel.mention}'))
         except (discord.Forbidden, discord.HTTPException) as exc:
             log.exception('Não foi possível criar ticket: %s', exc)
@@ -415,8 +380,7 @@ async def add_painel(interaction: discord.Interaction, titulo: str, descricao: s
         buttons = ['Ver produtos', 'Cupons', 'Suporte']
     e = panel_embed(titulo, descricao, categoria, imagem, cor)
     view = PublishPanelView(interaction.guild_id, canal.id, titulo, descricao, categoria, imagem, cor, buttons, interaction.user.id)
-    e.add_field(name='Publicação', value=f'Prévia privada. O painel será publicado em {canal.mention} somente quando você confirmar.', inline=False)
-    await interaction.response.send_message(embed=e, view=view, ephemeral=True)
+    await interaction.response.send_message(embed=status_embed('👀 Prévia do painel', f'Confira o painel abaixo. Ele será publicado em {canal.mention} somente quando você confirmar.', success=True), view=view, ephemeral=True)
 
 @edit_group.command(name='painel', description='Editar qualquer painel criado por este bot no servidor')
 @premium_only()
@@ -430,10 +394,10 @@ async def editar_painel(interaction: discord.Interaction):
 
 @bot.tree.command(name='ajuda-vendas', description='Ajuda para usar os comandos de vendas')
 async def ajuda_vendas(interaction: discord.Interaction):
-    text = '**Comandos da ZORDX STORE BOT**\n`/produtos` — ver catálogo e estoque\n`/addproduto` — cadastrar produto (equipe)\n`/addestoque` — adicionar estoque (equipe)\n`/girar produto` — remover produto (equipe)\n`/add painel` — criar painel com prévia\n`/editar painel` — editar painel existente (Premium)\n`/cupons` — listar cupons (Premium)\n`/addcupom` — criar cupom (Premium)\n`/tirar cupom` — remover cupom (Premium)\n`/saldo` e `/sacar` — consultar saldo e solicitar saque\n`/config` — configurar a loja\n`/config-ticket geral` • `/config-ticket painel` • `/config-ticket automacao` — configurar tickets.'
+    text = '**Comandos da ZORDX STORE BOT**\n`/produtos` — ver catálogo e estoque\n`/addproduto` — cadastrar produto (equipe)\n`/addestoque` — adicionar estoque (equipe)\n`/girar produto` — remover produto (equipe)\n`/add painel` — criar painel com prévia\n`/editar painel` — editar painel existente (Premium)\n`/cupons` — listar cupons (Premium)\n`/addcupom` — criar cupom (Premium)\n`/tirar cupom` — remover cupom (Premium)\n`/saldo` e `/sacar` — consultar saldo e solicitar saque\n`/config` — configurar a loja\n`/config-ticket` — configurar categoria, suporte, logs e painel de tickets.'
     e = status_embed('📚 Ajuda de vendas', text)
     e.add_field(name='Painéis', value='`/add painel` • `/editar painel` • `/tirarpainel`', inline=False)
-    e.add_field(name='Tickets', value='`/config-ticket geral` • `painel` • `automacao` configuram o sistema de tickets.', inline=False)
+    e.add_field(name='Tickets', value='`/config-ticket` configura canal, categoria, suporte, logs e limite de tickets.', inline=False)
     await interaction.response.send_message(embed=e, ephemeral=True)
 
 @bot.tree.command(name='produtos', description='Mostrar catálogo, preços e estoque')
@@ -589,181 +553,147 @@ async def config(interaction: discord.Interaction, canal_loja: discord.TextChann
     e.add_field(name='Como usar', value='Passe os parâmetros do comando `/config` para alterar os canais.', inline=False)
     await interaction.response.send_message(embed=e, ephemeral=True)
 
-ticket_config_group = app_commands.Group(name='config-ticket', description='Configurar todos os recursos do sistema de tickets')
+class TicketTextModal(discord.ui.Modal):
+    def __init__(self, guild_id: int):
+        super().__init__(title='Personalizar painel de tickets')
+        self.guild_id = guild_id
+        self.titulo = discord.ui.TextInput(label='Título do painel', default=cfg(guild_id, 'ticket_panel_title', '🎫 Central de Atendimento'), max_length=100, required=True)
+        self.descricao = discord.ui.TextInput(label='Descrição do painel', default=cfg(guild_id, 'ticket_panel_description', 'Precisa de ajuda? Clique abaixo para abrir um ticket privado.'), style=discord.TextStyle.paragraph, max_length=1000, required=True)
+        self.boas_vindas = discord.ui.TextInput(label='Mensagem de boas-vindas', default=cfg(guild_id, 'ticket_greeting', 'Explique como podemos ajudar. A equipe responderá assim que possível.'), style=discord.TextStyle.paragraph, max_length=1000, required=True)
+        self.add_item(self.titulo)
+        self.add_item(self.descricao)
+        self.add_item(self.boas_vindas)
 
-@ticket_config_group.command(name='geral', description='Configurar canais, categorias, cargos e limites')
-@app_commands.describe(
-    canal_painel='Canal do painel', categoria='Categoria dos tickets abertos', categoria_fechados='Categoria para tickets fechados',
-    canal_logs='Canal de logs', canal_transcripts='Canal de transcrições', cargo_staff='Cargo da equipe',
-    cargo_suporte='Cargo de suporte', cargo_admin='Cargo de administradores', cargo_bloqueado='Cargo impedido de abrir tickets',
-    limite_tickets='Limite de tickets abertos por pessoa', cooldown='Intervalo entre aberturas em segundos',
-    anti_spam='Ativar proteção contra aberturas repetidas', confirmar_fechamento='Pedir confirmação ao fechar',
-    dm_fechamento='Avisar o usuário por DM ao fechar', notificar_staff='Mencionar a equipe nos novos tickets',
-    auto_fechar='Fechar por inatividade em horas; 0 desativa', aviso_inatividade='Avisar por inatividade em horas; 0 desativa'
-)
-@staff_only()
-async def config_ticket_geral(
-    interaction: discord.Interaction,
-    canal_painel: discord.TextChannel = None,
-    categoria: discord.CategoryChannel = None,
-    categoria_fechados: discord.CategoryChannel = None,
-    canal_logs: discord.TextChannel = None,
-    canal_transcripts: discord.TextChannel = None,
-    cargo_staff: discord.Role = None,
-    cargo_suporte: discord.Role = None,
-    cargo_admin: discord.Role = None,
-    cargo_bloqueado: discord.Role = None,
-    limite_tickets: app_commands.Range[int, 1, 5] = None,
-    cooldown: app_commands.Range[int, 0, 86400] = None,
-    anti_spam: bool = None,
-    confirmar_fechamento: bool = None,
-    dm_fechamento: bool = None,
-    notificar_staff: bool = None,
-    auto_fechar: app_commands.Range[int, 0, 720] = None,
-    aviso_inatividade: app_commands.Range[int, 0, 720] = None,
-):
-    guild = interaction.guild
-    if guild is None:
-        return await interaction.response.send_message(embed=status_embed('ZORDX STORE', 'Use este comando dentro do servidor.'), ephemeral=True)
-    changes = []
-    values = [
-        (canal_painel, 'ticket_panel_channel_id', lambda x: x.id, 'Canal do painel'),
-        (categoria, 'ticket_category_id', lambda x: x.id, 'Categoria de tickets'),
-        (categoria_fechados, 'ticket_closed_category_id', lambda x: x.id, 'Categoria de fechados'),
-        (canal_logs, 'ticket_logs_channel_id', lambda x: x.id, 'Canal de logs'),
-        (canal_transcripts, 'ticket_transcripts_channel_id', lambda x: x.id, 'Canal de transcrições'),
-        (cargo_staff, 'ticket_staff_role_id', lambda x: x.id, 'Cargo staff'),
-        (cargo_suporte, 'ticket_support_role_id', lambda x: x.id, 'Cargo suporte'),
-        (cargo_admin, 'ticket_admin_role_id', lambda x: x.id, 'Cargo admin'),
-        (cargo_bloqueado, 'ticket_blocked_role_id', lambda x: x.id, 'Cargo bloqueado'),
-        (limite_tickets, 'ticket_open_limit', str, 'Limite de tickets'),
-        (cooldown, 'ticket_cooldown', str, 'Cooldown em segundos'),
-        (anti_spam, 'ticket_anti_spam', lambda x: str(x).lower(), 'Anti-spam'),
-        (confirmar_fechamento, 'ticket_confirm_close', lambda x: str(x).lower(), 'Confirmação de fechamento'),
-        (dm_fechamento, 'ticket_dm_close', lambda x: str(x).lower(), 'DM ao fechar'),
-        (notificar_staff, 'ticket_notify_staff', lambda x: str(x).lower(), 'Notificar staff'),
-        (auto_fechar, 'ticket_auto_close_hours', str, 'Auto-fechamento em horas'),
-        (aviso_inatividade, 'ticket_inactivity_warning_hours', str, 'Aviso de inatividade em horas'),
-    ]
-    for value, key, converter, label in values:
-        if value is not None:
-            set_cfg(guild.id, key, converter(value))
-            changes.append(f'{label}: {value.mention if isinstance(value, (discord.Role, discord.abc.GuildChannel)) else value}')
-    if canal_painel:
-        title = cfg(guild.id, 'ticket_panel_title', '🎫 Central de Atendimento')
-        description = cfg(guild.id, 'ticket_panel_description', 'Precisa de ajuda? Clique abaixo para abrir um ticket privado com a equipe.')
-        color = cfg(guild.id, 'ticket_color', DEFAULT_COLOR)
-        embed = discord.Embed(title=title[:256], description=description[:4000], color=color_from(color))
-        thumbnail = cfg(guild.id, 'ticket_thumbnail', '')
-        image = cfg(guild.id, 'ticket_image', '')
-        footer = cfg(guild.id, 'ticket_footer', f'{SHOP_NAME} • Central de suporte')
-        if thumbnail.startswith(('https://', 'http://')):
-            embed.set_thumbnail(url=thumbnail)
-        if image.startswith(('https://', 'http://')):
-            embed.set_image(url=image)
-        embed.set_footer(text=footer[:2048])
+    async def on_submit(self, interaction: discord.Interaction):
+        set_cfg(self.guild_id, 'ticket_panel_title', self.titulo.value)
+        set_cfg(self.guild_id, 'ticket_panel_description', self.descricao.value)
+        set_cfg(self.guild_id, 'ticket_greeting', self.boas_vindas.value)
+        await interaction.response.send_message(embed=status_embed('✅ Configurações salvas', 'Título, descrição e mensagem de boas-vindas foram atualizados.', success=True), ephemeral=True)
+
+class TicketLimitModal(discord.ui.Modal):
+    def __init__(self, guild_id: int):
+        super().__init__(title='Limite de tickets por pessoa')
+        self.guild_id = guild_id
+        self.limite = discord.ui.TextInput(label='Máximo de tickets abertos (1 a 5)', default=cfg(guild_id, 'ticket_open_limit', '1'), min_length=1, max_length=1, required=True)
+        self.add_item(self.limite)
+
+    async def on_submit(self, interaction: discord.Interaction):
         try:
-            await canal_painel.send(embed=embed, view=TicketPanelView(guild.id))
-            changes.append(f'Painel publicado em {canal_painel.mention}')
+            value = int(self.limite.value)
+            if value < 1 or value > 5:
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message(embed=status_embed('Valor inválido', 'Digite um número de 1 a 5.', success=False), ephemeral=True)
+        set_cfg(self.guild_id, 'ticket_open_limit', value)
+        await interaction.response.send_message(embed=status_embed('✅ Limite atualizado', f'Cada pessoa poderá ter até **{value}** ticket(s) aberto(s).', success=True), ephemeral=True)
+
+class TicketSetupView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.add_item(TicketSetupSelect(guild_id))
+
+    @discord.ui.button(label='Personalizar textos', style=discord.ButtonStyle.primary, emoji='✏️', row=1)
+    async def customize(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TicketTextModal(self.guild_id))
+
+    @discord.ui.button(label='Limite de tickets', style=discord.ButtonStyle.secondary, emoji='🔢', row=1)
+    async def limit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TicketLimitModal(self.guild_id))
+
+    @discord.ui.button(label='Publicar painel', style=discord.ButtonStyle.success, emoji='📨', row=2)
+    async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=status_embed('📨 Publicar painel', 'Escolha o canal usando o menu abaixo.', success=True), view=TicketPublishView(self.guild_id), ephemeral=True)
+
+class TicketSetupSelect(discord.ui.Select):
+    def __init__(self, guild_id: int):
+        self.guild_id = guild_id
+        options = [
+            discord.SelectOption(label='Categoria dos tickets', description='Onde os canais privados serão criados', emoji='📁', value='category'),
+            discord.SelectOption(label='Cargo de suporte', description='Equipe que poderá ver e responder', emoji='👥', value='role'),
+            discord.SelectOption(label='Canal de logs', description='Registrar abertura e fechamento', emoji='📋', value='logs'),
+        ]
+        super().__init__(placeholder='⚙️ Atendimento — selecione uma configuração', min_values=1, max_values=1, options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        if value == 'category':
+            view = discord.ui.View(timeout=180)
+            view.add_item(TicketCategorySelect(self.guild_id))
+            return await interaction.response.send_message(embed=status_embed('📁 Categoria dos tickets', 'Selecione a categoria onde os tickets serão criados.'), view=view, ephemeral=True)
+        if value == 'role':
+            view = discord.ui.View(timeout=180)
+            view.add_item(TicketRoleSelect(self.guild_id))
+            return await interaction.response.send_message(embed=status_embed('👥 Cargo de suporte', 'Selecione o cargo que terá acesso aos tickets.'), view=view, ephemeral=True)
+        view = discord.ui.View(timeout=180)
+        view.add_item(TicketLogsSelect(self.guild_id))
+        await interaction.response.send_message(embed=status_embed('📋 Canal de logs', 'Selecione o canal para registrar os tickets.'), view=view, ephemeral=True)
+
+class TicketCategorySelect(discord.ui.ChannelSelect):
+    def __init__(self, guild_id):
+        self.guild_id = guild_id
+        super().__init__(placeholder='Selecione a categoria', channel_types=[discord.ChannelType.category], min_values=1, max_values=1)
+    async def callback(self, interaction):
+        set_cfg(self.guild_id, 'ticket_category_id', self.values[0].id)
+        await interaction.response.send_message(embed=status_embed('✅ Categoria salva', f'Categoria definida para **{self.values[0].name}**.', success=True), ephemeral=True)
+
+class TicketRoleSelect(discord.ui.RoleSelect):
+    def __init__(self, guild_id):
+        self.guild_id = guild_id
+        super().__init__(placeholder='Selecione o cargo de suporte', min_values=1, max_values=1)
+    async def callback(self, interaction):
+        set_cfg(self.guild_id, 'ticket_support_role_id', self.values[0].id)
+        await interaction.response.send_message(embed=status_embed('✅ Cargo salvo', f'Cargo de suporte definido para {self.values[0].mention}.', success=True), ephemeral=True)
+
+class TicketLogsSelect(discord.ui.ChannelSelect):
+    def __init__(self, guild_id):
+        self.guild_id = guild_id
+        super().__init__(placeholder='Selecione o canal de logs', channel_types=[discord.ChannelType.text], min_values=1, max_values=1)
+    async def callback(self, interaction):
+        set_cfg(self.guild_id, 'ticket_logs_channel_id', self.values[0].id)
+        await interaction.response.send_message(embed=status_embed('✅ Canal de logs salvo', f'Logs serão enviados em {self.values[0].mention}.', success=True), ephemeral=True)
+
+class TicketPublishView(discord.ui.View):
+    def __init__(self, guild_id):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        self.add_item(TicketPublishChannelSelect(guild_id))
+
+class TicketPublishChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, guild_id):
+        self.guild_id = guild_id
+        super().__init__(placeholder='Escolha onde publicar o painel', channel_types=[discord.ChannelType.text], min_values=1, max_values=1)
+    async def callback(self, interaction: discord.Interaction):
+        channel = self.values[0]
+        title = cfg(self.guild_id, 'ticket_panel_title', '🎫 Central de Atendimento')
+        description = cfg(self.guild_id, 'ticket_panel_description', 'Precisa de ajuda? Clique no botão abaixo para abrir um ticket privado com a equipe.')
+        embed = discord.Embed(title=title[:256], description=description[:4000], color=color_from(DEFAULT_COLOR))
+        embed.add_field(name='🔒 Atendimento privado', value='Somente você e a equipe autorizada poderão ver seu ticket.', inline=True)
+        embed.add_field(name='⚡ Como funciona', value='Clique em **Abrir ticket** e descreva o que precisa.', inline=True)
+        embed.add_field(name='🧾 Antes de abrir', value='Envie detalhes úteis para agilizar o atendimento.', inline=False)
+        embed.set_footer(text=f'{SHOP_NAME} • Central de suporte')
+        try:
+            await channel.send(embed=embed, view=TicketPanelView())
         except (discord.Forbidden, discord.HTTPException):
-            return await interaction.response.send_message(embed=status_embed('ZORDX STORE', 'Não consegui publicar o painel. Confira as permissões do bot no canal.'), ephemeral=True)
-    if not changes:
-        changes.append('Nenhuma opção alterada. Informe as opções que deseja configurar.')
-    result = status_embed('🎫 Configuração de tickets', '\n'.join(f'• {item}' for item in changes), success=True)
-    result.add_field(name='Mais opções', value='Use `/config-ticket painel` para personalização e `/config-ticket automacao` para automações.', inline=False)
-    await interaction.response.send_message(embed=result, ephemeral=True)
+            return await interaction.response.send_message(embed=status_embed('❌ Não foi possível publicar', 'Confira as permissões do bot no canal escolhido.', success=False), ephemeral=True)
+        await interaction.response.send_message(embed=status_embed('✅ Painel publicado', f'O painel de tickets foi publicado em {channel.mention}.', success=True), ephemeral=True)
 
-@ticket_config_group.command(name='painel', description='Personalizar o embed e a abertura dos tickets')
-@app_commands.describe(titulo='Título do painel', descricao='Descrição do painel', cor='Cor hexadecimal', imagem='URL da imagem principal', thumbnail='URL da miniatura', rodape='Texto do rodapé', botao_texto='Texto do botão de abertura', mensagem_abertura='Mensagem dentro do ticket', tipo_ticket='Nome do atendimento', perguntas='Perguntas ou informações solicitadas', prioridade='Prioridade padrão')
+@bot.tree.command(name='config-ticket', description='Abrir painel interativo de configuração de tickets')
 @staff_only()
-async def config_ticket_painel(
-    interaction: discord.Interaction,
-    titulo: str = None,
-    descricao: str = None,
-    cor: str = None,
-    imagem: str = None,
-    thumbnail: str = None,
-    rodape: str = None,
-    botao_texto: str = None,
-    mensagem_abertura: str = None,
-    tipo_ticket: str = None,
-    perguntas: str = None,
-    prioridade: str = None,
-):
+async def config_ticket(interaction: discord.Interaction):
     guild = interaction.guild
     if guild is None:
         return await interaction.response.send_message(embed=status_embed('ZORDX STORE', 'Use este comando dentro do servidor.'), ephemeral=True)
-    values = [
-        (titulo, 'ticket_panel_title', 'Título'), (descricao, 'ticket_panel_description', 'Descrição'),
-        (cor, 'ticket_color', 'Cor'), (imagem, 'ticket_image', 'Imagem'),
-        (thumbnail, 'ticket_thumbnail', 'Thumbnail'), (rodape, 'ticket_footer', 'Rodapé'),
-        (botao_texto, 'ticket_button_label', 'Botão'), (mensagem_abertura, 'ticket_greeting', 'Mensagem de abertura'),
-        (tipo_ticket, 'ticket_type', 'Tipo de ticket'), (perguntas, 'ticket_questions', 'Perguntas'),
-        (prioridade, 'ticket_priority', 'Prioridade'),
-    ]
-    changes = []
-    for value, key, label in values:
-        if value is None:
-            continue
-        if key in ('ticket_image', 'ticket_thumbnail') and value and not value.startswith(('https://', 'http://')):
-            return await interaction.response.send_message(embed=status_embed('ZORDX STORE', f'{label}: informe uma URL HTTP ou HTTPS.'), ephemeral=True)
-        if key == 'ticket_color':
-            try:
-                int(value.replace('#', ''), 16)
-            except ValueError:
-                return await interaction.response.send_message(embed=status_embed('ZORDX STORE', 'A cor deve ser hexadecimal, por exemplo `8B35FF`.'), ephemeral=True)
-            value = value.replace('#', '')[:6]
-        limits = {'ticket_panel_title': 256, 'ticket_panel_description': 4000, 'ticket_footer': 2048, 'ticket_button_label': 80, 'ticket_greeting': 1000, 'ticket_type': 80, 'ticket_questions': 1000, 'ticket_priority': 100}
-        set_cfg(guild.id, key, value[:limits.get(key, 2000)])
-        changes.append(label)
-    if not changes:
-        return await interaction.response.send_message(embed=status_embed('🎫 Personalização', 'Informe pelo menos uma opção para alterar.'), ephemeral=True)
-    embed = discord.Embed(title=cfg(guild.id, 'ticket_panel_title', '🎫 Central de Atendimento')[:256], description=cfg(guild.id, 'ticket_panel_description', 'Precisa de ajuda? Clique abaixo para abrir um ticket privado com a equipe.')[:4000], color=color_from(cfg(guild.id, 'ticket_color', DEFAULT_COLOR)))
-    thumbnail_url = cfg(guild.id, 'ticket_thumbnail', '')
-    image_url = cfg(guild.id, 'ticket_image', '')
-    footer_text = cfg(guild.id, 'ticket_footer', f'{SHOP_NAME} • Central de suporte')
-    if thumbnail_url.startswith(('https://', 'http://')):
-        embed.set_thumbnail(url=thumbnail_url)
-    if image_url.startswith(('https://', 'http://')):
-        embed.set_image(url=image_url)
-    embed.set_footer(text=footer_text[:2048])
-    await interaction.response.send_message(embed=status_embed('✅ Personalização salva', 'Opções atualizadas: ' + ', '.join(changes) + '. Use `/config-ticket geral canal_painel:#canal` para publicar o painel atualizado.'), ephemeral=True)
-    # Preview is private; user can inspect before publishing.
-    await interaction.followup.send(embed=embed, ephemeral=True, view=TicketPanelView(guild.id))
-
-@ticket_config_group.command(name='automacao', description='Configurar comportamento e avisos dos tickets')
-@app_commands.describe(tipo_ticket='Tipo padrão de ticket', perguntas='Perguntas do formulário', prioridade='Prioridade padrão', auto_fechar='Horas de inatividade antes de fechar; 0 desativa', aviso_inatividade='Horas até avisar sobre inatividade; 0 desativa', anti_spam='Ativar proteção contra spam', confirmar_fechamento='Pedir confirmação antes de fechar', dm_fechamento='Enviar DM ao fechar', notificar_staff='Mencionar a equipe ao abrir')
-@staff_only()
-async def config_ticket_automacao(
-    interaction: discord.Interaction,
-    tipo_ticket: str = None,
-    perguntas: str = None,
-    prioridade: str = None,
-    auto_fechar: app_commands.Range[int, 0, 720] = None,
-    aviso_inatividade: app_commands.Range[int, 0, 720] = None,
-    anti_spam: bool = None,
-    confirmar_fechamento: bool = None,
-    dm_fechamento: bool = None,
-    notificar_staff: bool = None,
-):
-    guild = interaction.guild
-    if guild is None:
-        return await interaction.response.send_message(embed=status_embed('ZORDX STORE', 'Use este comando dentro do servidor.'), ephemeral=True)
-    values = [
-        (tipo_ticket, 'ticket_type', 'Tipo de ticket'), (perguntas, 'ticket_questions', 'Perguntas'),
-        (prioridade, 'ticket_priority', 'Prioridade'), (auto_fechar, 'ticket_auto_close_hours', 'Auto-fechar (horas)'),
-        (aviso_inatividade, 'ticket_inactivity_warning_hours', 'Aviso de inatividade (horas)'),
-        (anti_spam, 'ticket_anti_spam', 'Anti-spam'), (confirmar_fechamento, 'ticket_confirm_close', 'Confirmar fechamento'),
-        (dm_fechamento, 'ticket_dm_close', 'DM ao fechar'), (notificar_staff, 'ticket_notify_staff', 'Notificar equipe'),
-    ]
-    changes = []
-    for value, key, label in values:
-        if value is not None:
-            set_cfg(guild.id, key, str(value).lower() if isinstance(value, bool) else value)
-            changes.append(f'{label}: {value}')
-    if not changes:
-        changes.append('Nenhuma opção alterada. Informe uma ou mais opções.')
-    await interaction.response.send_message(embed=status_embed('⚙️ Automação de tickets', '\n'.join(f'• {x}' for x in changes), success=True), ephemeral=True)
+    category_id = int(cfg(guild.id, 'ticket_category_id', '0') or 0)
+    role_id = int(cfg(guild.id, 'ticket_support_role_id', '0') or 0)
+    logs_id = int(cfg(guild.id, 'ticket_logs_channel_id', '0') or 0)
+    category = guild.get_channel(category_id) if category_id else None
+    role = guild.get_role(role_id) if role_id else None
+    logs = guild.get_channel(logs_id) if logs_id else None
+    embed = status_embed('🔧 | Configurações Gerais', 'Ajustes que controlam o funcionamento do sistema de tickets no servidor.\n\n**👥 Atendimento** — cargos, categoria e logs. Cada opção pode ser configurada individualmente.\n**✏️ Personalização** — título, descrição e mensagem de boas-vindas.\n**🔢 Limite de tickets** — quantidade máxima de tickets abertos por pessoa.\n**📨 Publicação** — enviar o painel para o canal escolhido.', success=True)
+    embed.add_field(name='📌 Estado atual', value=f"**Categoria:** {category.name if isinstance(category, discord.CategoryChannel) else 'Não configurada'}\n**Cargo de suporte:** {role.mention if role else 'Não configurado'}\n**Canal de logs:** {logs.mention if isinstance(logs, discord.TextChannel) else 'Não configurado'}\n**Limite por pessoa:** {cfg(guild.id, 'ticket_open_limit', '1')}", inline=False)
+    embed.set_footer(text=f'{SHOP_NAME} • Painel administrativo • Só você pode ver esta mensagem')
+    await interaction.response.send_message(embed=embed, view=TicketSetupView(guild.id), ephemeral=True)
 
 @bot.tree.command(name='saldo', description='Consultar seu saldo disponível para saque')
 async def saldo(interaction: discord.Interaction):
@@ -802,7 +732,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         message = 'Ocorreu um erro ao executar o comando. Confira os registros da hospedagem.'
     try:
         if interaction.response.is_done():
-            await interaction.followup.send(embed=status_embed('ZORDX STORE', message, success=False), ephemeral=True)
+            await interaction.followup.send(embed=status_embed('ZORDX STORE', message), ephemeral=True)
         else:
             await interaction.response.send_message(ephemeral=True, embed=status_embed('ZORDX STORE', message))
     except discord.HTTPException:
@@ -845,7 +775,6 @@ async def main():
     bot.tree.add_command(remove_group)
     bot.tree.add_command(spin_group)
     bot.tree.add_command(embed_group)
-    bot.tree.add_command(ticket_config_group)
     async with bot:
         await bot.start(TOKEN)
 if __name__ == '__main__':
