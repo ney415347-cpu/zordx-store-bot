@@ -47,7 +47,36 @@ def money(value):
     return f'R$ {float(value):,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
 
 def is_staff(interaction: discord.Interaction):
-    return isinstance(interaction.user, discord.Member) and (interaction.user.guild_permissions.administrator or interaction.user.guild_permissions.manage_guild or interaction.user.guild_permissions.manage_messages)
+    if not isinstance(interaction.user, discord.Member) or not interaction.guild:
+        return False
+    # O dono do servidor sempre tem acesso, mesmo que as permissões não sejam reconhecidas.
+    if interaction.user.id == interaction.guild.owner_id:
+        return True
+    perms = interaction.user.guild_permissions
+    if perms.administrator or perms.manage_guild or perms.manage_messages:
+        return True
+    guild_id = interaction.guild_id
+    if not guild_id:
+        return False
+    # Cargos escolhidos em /config-ticket > Painéis de Ticket > Cargos de Suporte.
+    if any(role_id in ticket_role_ids(guild_id) for role_id in (role.id for role in interaction.user.roles)):
+        return True
+    # Membros autorizados individualmente pelo dono/admin do servidor.
+    try:
+        allowed_users = [int(x) for x in json.loads(cfg(guild_id, 'staff_user_ids', '[]'))]
+    except (ValueError, TypeError, json.JSONDecodeError):
+        allowed_users = []
+    return interaction.user.id in allowed_users
+
+
+def can_manage_staff(interaction: discord.Interaction):
+    return bool(
+        isinstance(interaction.user, discord.Member)
+        and interaction.guild
+        and (interaction.user.id == interaction.guild.owner_id
+             or interaction.user.guild_permissions.administrator
+             or interaction.user.guild_permissions.manage_guild)
+    )
 
 def is_ticket_staff(interaction: discord.Interaction):
     if not isinstance(interaction.user, discord.Member):
@@ -1254,6 +1283,35 @@ async def config_ticket(interaction: discord.Interaction):
             view=TicketHomeView(guild.id),
             ephemeral=True
         )
+
+@bot.tree.command(name='autorizar-membro', description='Autorizar um membro a usar os comandos da equipe')
+@app_commands.describe(membro='Membro que poderá usar os comandos da equipe')
+async def autorizar_membro(interaction: discord.Interaction, membro: discord.Member):
+    if not can_manage_staff(interaction):
+        return await interaction.response.send_message(embed=status_embed('🔒 Acesso restrito', 'Somente o dono ou um administrador do servidor pode autorizar membros.'), ephemeral=True)
+    try:
+        allowed = [int(x) for x in json.loads(cfg(interaction.guild_id, 'staff_user_ids', '[]'))]
+    except (ValueError, TypeError, json.JSONDecodeError):
+        allowed = []
+    if membro.id not in allowed:
+        allowed.append(membro.id)
+        set_cfg(interaction.guild_id, 'staff_user_ids', json.dumps(allowed))
+    await interaction.response.send_message(embed=status_embed('✅ Membro autorizado', f'{membro.mention} agora pode usar os comandos da equipe.'), ephemeral=True)
+
+
+@bot.tree.command(name='desautorizar-membro', description='Remover a autorização individual de um membro')
+@app_commands.describe(membro='Membro que perderá o acesso aos comandos da equipe')
+async def desautorizar_membro(interaction: discord.Interaction, membro: discord.Member):
+    if not can_manage_staff(interaction):
+        return await interaction.response.send_message(embed=status_embed('🔒 Acesso restrito', 'Somente o dono ou um administrador do servidor pode remover autorizações.'), ephemeral=True)
+    try:
+        allowed = [int(x) for x in json.loads(cfg(interaction.guild_id, 'staff_user_ids', '[]'))]
+    except (ValueError, TypeError, json.JSONDecodeError):
+        allowed = []
+    allowed = [user_id for user_id in allowed if user_id != membro.id]
+    set_cfg(interaction.guild_id, 'staff_user_ids', json.dumps(allowed))
+    await interaction.response.send_message(embed=status_embed('✅ Autorização removida', f'{membro.mention} não está mais autorizado individualmente.'), ephemeral=True)
+
 
 @bot.tree.command(name='saldo', description='Consultar seu saldo disponível para saque')
 async def saldo(interaction: discord.Interaction):
